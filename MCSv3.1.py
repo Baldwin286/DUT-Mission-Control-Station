@@ -9,20 +9,23 @@ import socket
 import csv
 
 # --- GPU and FFMPEG OPTIMIZED ---
-os.environ["QT_OPENGL"] = "desktop" 
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu-compositing --ignore-gpu-blocklist"
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|er;1" 
+os.environ["QSG_RHI_BACKEND"] = "opengl"
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu-compositing --ignore-gpu-blocklist --log-level=3"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|er;1"
 
 import serial.tools.list_ports
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QFrame, QPushButton, QComboBox, 
                              QGridLayout, QTextEdit, QGroupBox, QStackedWidget,
-                             QMessageBox, QDoubleSpinBox, QSizePolicy)
-from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor
+                             QMessageBox, QDoubleSpinBox, QSizePolicy, 
+                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView)
+from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor, QVector3D
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPointF, QRectF, QDateTime, QTimer, QUrl
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import pyqtgraph as pg
+import pyqtgraph.opengl as gl
+
 from pymavlink import mavutil
 
 # --- EMBEDD FLY PROGRAMMING FILE ---
@@ -256,6 +259,12 @@ class MavlinkWorker(QThread):
                     d.update({"seq": msg.seq})
                 elif t in ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
                     d.update({"type": t, "msg_obj": msg})
+                elif t == 'PARAM_VALUE':
+                    d.update({
+                        "param_id": msg.param_id,
+                        "param_value": msg.param_value,
+                        "param_type": msg.param_type
+                    })
 
                 self.data_changed.emit(d)
         except Exception as e:
@@ -272,7 +281,8 @@ class PFDWidget(QWidget):
         self.roll, self.pitch, self.heading, self.alt, self.speed, self.batt_v, self.batt_a, self.batt_p, self.gps_sats = 0, 0, 0, 0, 0, 0, 0, 0, 0
         self.ekf_status, self.flight_mode, self.status_msg = "---", "OFFLINE", "Ready"
         self.is_armed = False
-        self.setMinimumSize(350, 350)
+        
+        self.setMinimumSize(250, 250) 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.gps_hdop = 0.0 
@@ -299,8 +309,12 @@ class PFDWidget(QWidget):
         p.restore()
 
         # Tapes
-        p.save(); tape_w, tape_h, tape_y, left_tx, right_tx = 65, h - 100, 45, 10, w - 75
-        p.setBrush(QColor(0, 0, 0, 100)); p.drawRect(left_tx, tape_y, tape_w, tape_h); p.drawRect(right_tx, tape_w, tape_w, tape_h) 
+        p.save(); tape_w, tape_h, tape_y, left_tx, right_tx = 65, h - 80, 35, 10, w - 75
+        p.setBrush(QColor(0, 0, 0, 100))
+        p.drawRect(left_tx, tape_y, tape_w, tape_h) 
+        
+        p.drawRect(right_tx, tape_y, tape_w, tape_h) 
+        
         p.setPen(Qt.GlobalColor.white); p.setFont(QFont("Arial", 9))
         def draw_tape_ticks(x_pos, current_val, is_alt):
             p.save(); p.setClipRect(x_pos, tape_y, tape_w, tape_h); cy_tape = tape_y + tape_h / 2
@@ -323,19 +337,113 @@ class PFDWidget(QWidget):
         p.setPen(Qt.GlobalColor.white); p.setFont(QFont("Arial", 11, QFont.Weight.Bold)); p.drawText(QRectF(0, cy + 35, w, 30), Qt.AlignmentFlag.AlignCenter, self.status_msg)
         p.restore()
 
-        # Bottom HUD 
         p.save()
         p.setBrush(QColor(0, 0, 0, 220))
-        p.drawRect(0, h-45, w, 45)
-        p.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        hud_h = 35
+        p.drawRect(0, h - hud_h, w, hud_h)
+        p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         p.setPen(Qt.GlobalColor.white)
         
-        combined_str = f"Bat: {self.batt_v:.1f}V {self.batt_a:.1f}A | EKF: {self.ekf_status} | GPS: {self.gps_sats} Sats (HDOP: {self.gps_hdop:.1f}) | RSSI: {self.rssi}%"
-        p.drawText(QRectF(0, h-45, w, 45), Qt.AlignmentFlag.AlignCenter, combined_str)
+        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A  |  EKF: {self.ekf_status}  |  GPS: {self.gps_sats} (HDOP: {self.gps_hdop:.1f})  |  RSSI: {self.rssi}%"
+        p.drawText(QRectF(0, h - hud_h, w, hud_h), Qt.AlignmentFlag.AlignCenter, combined_str)
         p.restore()
 
         p.setPen(QPen(Qt.GlobalColor.red, 3)); p.drawLine(int(cx-60), int(cy), int(cx-20), int(cy)); p.drawLine(int(cx+20), int(cy), int(cx+60), int(cy))
         p.drawPolygon(QPolygonF([QPointF(cx, cy), QPointF(cx-8, cy+8), QPointF(cx+8, cy+8)]))
+
+class drone3DWidget(QWidget):
+    def __init__(self, mav_worker=None, log_callback=None):
+        super().__init__()
+        self.mav_worker = mav_worker
+        self.log_callback = log_callback
+        layout = QVBoxLayout(self)
+
+        # --- CALIBRATE ---
+        btn_lay = QHBoxLayout()
+        self.btn_calib = QPushButton("CALIBRATE LEVEL")
+        self.btn_calib.setStyleSheet("background: #f39c12; font-weight: bold; color: white; padding: 10px; border-radius: 5px;")
+        self.btn_calib.clicked.connect(self.calibrate_level)
+        btn_lay.addWidget(self.btn_calib)
+        layout.addLayout(btn_lay)
+
+        from PyQt6.QtGui import QVector3D
+        self.view = gl.GLViewWidget()
+        self.view.setCameraPosition(distance=15, elevation=30, azimuth=45)
+        self.view.setBackgroundColor('#121212')
+        layout.addWidget(self.view, 1)
+
+        grid = gl.GLGridItem()
+        grid.setSize(x=20, y=20, z=20)
+        grid.setSpacing(x=1, y=1, z=1)
+        self.view.addItem(grid)
+
+        arm_len = 3.0
+        
+        body_box = gl.GLBoxItem(size=QVector3D(1, 1, 0.5), color=(0.2, 0.2, 0.2, 1.0))
+        body_box.init_offset = (-0.5, -0.5, -0.25) 
+        self.view.addItem(body_box)
+
+        pts = [
+            [arm_len, arm_len, 0.0], [-arm_len, -arm_len, 0.0],   
+            [-arm_len, arm_len, 0.0], [arm_len, -arm_len, 0.0]    
+        ]
+        
+        self.arms = []
+        for p in pts:
+            line_pts = np.array([[0,0,0], p])
+            p_color = (1.0, 1.0, 1.0, 1.0) if p[1] < 0 else (1.0, 0.0, 0.0, 1.0)
+            arm = gl.GLLinePlotItem(pos=line_pts, color=p_color, width=15, antialias=True, mode='lines')
+            arm.init_offset = (0.0, 0.0, 0.0)
+            self.arms.append(arm)
+            self.view.addItem(arm)
+        
+        self.motors = []
+        self.props = []
+        
+        motor_mesh = gl.MeshData.cylinder(rows=1, cols=16, radius=[0.2, 0.2], length=0.6)
+        prop_mesh = gl.MeshData.cylinder(rows=1, cols=20, radius=[0.8, 0.8], length=0.01)
+
+        for p in pts:
+            motor = gl.GLMeshItem(meshdata=motor_mesh, color=(0.4, 0.4, 0.4, 1.0), smooth=True)
+            motor.init_offset = (float(p[0]), float(p[1]), -0.3)
+            self.motors.append(motor)
+            self.view.addItem(motor)
+
+            p_color = (1.0, 1.0, 1.0, 0.7) if p[1] < 0 else (1.0, 0.0, 0.0, 0.7)
+            prop = gl.GLMeshItem(meshdata=prop_mesh, color=p_color, smooth=True)
+            prop.init_offset = (float(p[0]), float(p[1]), 0.3)
+            self.props.append(prop)
+            self.view.addItem(prop)
+
+        self.drone_model = [body_box] + self.arms + self.motors + self.props
+        
+        self.update_attitude(0, 0, 0)
+
+    def update_attitude(self, roll, pitch, yaw):
+        for item in self.drone_model:
+            item.resetTransform()
+            
+            if hasattr(item, 'init_offset'):
+                dx, dy, dz = item.init_offset
+                item.translate(dx, dy, dz)
+                
+            item.rotate(roll, 1, 0, 0)    
+            item.rotate(-pitch, 0, 1, 0)   
+            item.rotate(-yaw, 0, 0, 1)     
+
+    def calibrate_level(self):
+        if not self.mav_worker or not self.mav_worker.connection:
+            if self.log_callback: self.log_callback("<b style='color:red;'>[3D] Error: Drone not connected!</b>")
+            return
+            
+        self.mav_worker.connection.mav.command_long_send(
+            self.mav_worker.connection.target_system,
+            self.mav_worker.connection.target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
+            0, 0, 0, 0, 1, 0, 0  
+        )
+        
+        if self.log_callback: self.log_callback("<b style='color:#3498db;'>[3D] The Calibrate Level Acceleration command has been sent...</b>")
 
 class FlightWebPage(QWebEnginePage):
     fly_here_signal = pyqtSignal(float, float)
@@ -378,6 +486,9 @@ class DroneApp(QMainWindow):
         self.kml_file = None
         self.tts_worker = TTSWorker()
         self.tts_worker.start()
+
+        self.param_groups = {}    
+        self.param_tree_items = {}
         
         self.init_ui()
         self.port_timer = QTimer(self); self.port_timer.timeout.connect(self.refresh_ports); self.port_timer.start(1000)
@@ -527,26 +638,22 @@ class DroneApp(QMainWindow):
         central = QWidget(); self.setCentralWidget(central); main_layout = QVBoxLayout(central)
 
         # HEADER
-        header = QHBoxLayout(); logos = QHBoxLayout()
+        header_v = QVBoxLayout() 
+
+        top_row = QHBoxLayout()
+        logos = QHBoxLayout()
         paths = [r"F:\PBL_DATN\Mavlink_app\pictures\VN_flag.jpg", r"F:\PBL_DATN\Mavlink_app\pictures\image002.jpg"]
         for p in paths:
             lbl = QLabel()
             if os.path.exists(p): lbl.setPixmap(QPixmap(p).scaled(60, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             logos.addWidget(lbl)
-        header.addLayout(logos)
+        top_row.addLayout(logos)
+        
         title = QLabel("DUT MISSION CONTROL STATION"); title.setStyleSheet("font-size: 20px; font-weight: bold; color: #e74c3c; margin-left: 15px;")
-        header.addWidget(title)
+        top_row.addWidget(title)
         
-        nav_layout = QHBoxLayout()
-        self.nav_btn_style = "QPushButton { background-color: #2c3e50; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #34495e; } QPushButton:hover { background-color: #34495e; }"
-        self.active_btn_style = "background-color: #3498db; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #2980b9;"
-        self.btn_nav_flight = QPushButton("FLIGHT DATA"); self.btn_nav_mission = QPushButton("MISSION"); self.btn_nav_video = QPushButton("AI VIDEO STREAM"); self.btn_nav_replay = QPushButton("FLIGHT REPLAY")
-        btns = [self.btn_nav_flight, self.btn_nav_mission, self.btn_nav_video, self.btn_nav_replay]
-        for idx, btn in enumerate(btns):
-            btn.setStyleSheet(self.nav_btn_style);btn.setMinimumWidth(110) ;btn.clicked.connect(lambda checked, i=idx: self.switch_page(i)); nav_layout.addWidget(btn)
-        header.addStretch(); header.addLayout(nav_layout); header.addStretch()
+        top_row.addStretch()
         
-        #self.combo_type = QComboBox(); self.combo_type.addItems(["UDP (Pi)", "SERIAL"])
         self.combo_type = QComboBox(); self.combo_type.addItems(["SITL (UDP 14550)", "SITL (TCP 5762)", "UDP (Pi)", "SERIAL", "WIFI Local (ESP8266)"])
         self.combo_port = QComboBox(); self.combo_port.setMinimumWidth(150); self.refresh_ports()
         self.combo_baud = QComboBox(); self.combo_baud.addItems(["115200", "57600", "38400", "9600"])
@@ -554,8 +661,27 @@ class DroneApp(QMainWindow):
         self.btn_connect.setMinimumWidth(130)
         self.btn_connect.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 10px 20px; border-radius: 5px;")
         self.btn_connect.clicked.connect(self.toggle_connection)
-        header.addWidget(self.combo_type); header.addWidget(self.combo_port); header.addWidget(QLabel("Baud:")); header.addWidget(self.combo_baud); header.addWidget(self.btn_connect)
-        main_layout.addLayout(header)
+        
+        top_row.addWidget(self.combo_type); top_row.addWidget(self.combo_port); top_row.addWidget(QLabel("Baud:")); top_row.addWidget(self.combo_baud); top_row.addWidget(self.btn_connect)
+        
+        header_v.addLayout(top_row)
+
+        nav_row = QHBoxLayout()
+        self.nav_btn_style = "QPushButton { background-color: #2c3e50; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #34495e; } QPushButton:hover { background-color: #34495e; }"
+        self.active_btn_style = "background-color: #3498db; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #2980b9;"
+        
+        self.btn_nav_flight = QPushButton("FLIGHT DATA"); self.btn_nav_mission = QPushButton("MISSION"); self.btn_nav_video = QPushButton("AI VIDEO STREAM"); self.btn_nav_replay = QPushButton("FLIGHT REPLAY"); self.btn_nav_setup = QPushButton("3D SETUP")
+        self.btn_nav_config = QPushButton("CONFIG")
+        btns = [self.btn_nav_flight, self.btn_nav_mission, self.btn_nav_video, self.btn_nav_replay, self.btn_nav_config, self.btn_nav_setup]
+        
+        nav_row.addStretch() 
+        for idx, btn in enumerate(btns):
+            btn.setStyleSheet(self.nav_btn_style);btn.setMinimumWidth(110) ;btn.clicked.connect(lambda checked, i=idx: self.switch_page(i)); nav_row.addWidget(btn)
+        nav_row.addStretch() 
+        
+        header_v.addLayout(nav_row)
+
+        main_layout.addLayout(header_v)
 
         self.stacked_widget = QStackedWidget(); main_layout.addWidget(self.stacked_widget)
 
@@ -736,6 +862,81 @@ class DroneApp(QMainWindow):
     # PAGE 3: FLIGHT REPLAY
         self.page_replay = FlightReplayWidget()
         self.stacked_widget.addWidget(self.page_replay)
+
+        # PAGE 4: CONFIG & PARAMETER TUNING
+        self.page_config = QWidget()
+        cfg_layout = QVBoxLayout(self.page_config)
+
+        # 1. Quick Tuning - WPNAV_SPEED
+        quick_group = QGroupBox("QUICK TUNING (AUTO MODE)")
+        quick_group.setStyleSheet("""
+            QGroupBox { 
+                font-weight: bold; 
+                color: #f39c12; 
+                border: 1px solid #333; 
+                border-radius: 5px; 
+                margin-top: 15px; 
+                padding-top: 15px; 
+            } 
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                subcontrol-position: top left;
+                left: 10px; 
+                top: 0px;
+                padding: 0 3px; 
+            }
+        """)
+        quick_lay = QHBoxLayout(quick_group)
+        
+        quick_lay.addWidget(QLabel("Auto Flight Speed (WPNAV_SPEED):"))
+        self.spin_wp_speed = QDoubleSpinBox()
+        self.spin_wp_speed.setRange(0, 5000)
+        self.spin_wp_speed.setSuffix(" cm/s")
+        self.spin_wp_speed.setMinimumWidth(150)
+        
+        self.btn_set_wp_speed = QPushButton("SET SPEED")
+        self.btn_set_wp_speed.setStyleSheet("background: #d35400; font-weight: bold; color: white; padding: 5px;")
+        self.btn_set_wp_speed.clicked.connect(lambda: self.write_param("WPNAV_SPEED", self.spin_wp_speed.value()))
+        
+        quick_lay.addWidget(self.spin_wp_speed)
+        quick_lay.addWidget(self.btn_set_wp_speed)
+        quick_lay.addStretch()
+        cfg_layout.addWidget(quick_group)
+
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search parameters...")
+        self.search_box.setStyleSheet("background: #2c3e50; color: white; padding: 8px; border-radius: 5px; font-weight: bold; border: 1px solid #34495e;")
+        self.search_box.textChanged.connect(self.search_params) 
+        cfg_layout.addWidget(self.search_box)
+
+        self.param_tree = QTreeWidget()
+        self.param_tree.setColumnCount(2)
+        self.param_tree.setHeaderLabels(["Parameter Name", "Value"])
+        self.param_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.param_tree.setStyleSheet("""
+            QTreeWidget { background-color: #1e1e1e; color: #2ecc71; border: 1px solid #333; }
+            QTreeWidget::item:hover { background-color: #2c3e50; }
+            QTreeWidget::item:selected { background-color: #34495e; color: #f1c40f; font-weight: bold; }
+        """)
+        cfg_layout.addWidget(self.param_tree, 1)
+
+        cfg_btn_lay = QHBoxLayout()
+        self.btn_refresh_params = QPushButton("REFRESH ALL PARAMS")
+        self.btn_refresh_params.setStyleSheet("background: #2980b9; font-weight: bold; padding: 10px; border-radius: 5px; color: white;")
+        self.btn_refresh_params.clicked.connect(self.request_all_params)
+        
+        self.btn_write_param = QPushButton("WRITE SELECTED PARAM")
+        self.btn_write_param.setStyleSheet("background: #27ae60; font-weight: bold; padding: 10px; border-radius: 5px; color: white;")
+        self.btn_write_param.clicked.connect(self.action_write_selected_param)
+        
+        cfg_btn_lay.addWidget(self.btn_refresh_params)
+        cfg_btn_lay.addWidget(self.btn_write_param)
+        cfg_layout.addLayout(cfg_btn_lay)
+        self.stacked_widget.addWidget(self.page_config)
+
+        # PAGE 5: 3D SETUP 
+        self.page_setup = drone3DWidget(mav_worker=self.mav_worker, log_callback=self.append_log)
+        self.stacked_widget.addWidget(self.page_setup)
         self.switch_page(0)
 
     def toggle_record(self):
@@ -817,10 +1018,87 @@ class DroneApp(QMainWindow):
         self.btn_nav_mission.setStyleSheet(self.active_btn_style if index == 1 else self.nav_btn_style)
         self.btn_nav_video.setStyleSheet(self.active_btn_style if index == 2 else self.nav_btn_style)
         self.btn_nav_replay.setStyleSheet(self.active_btn_style if index == 3 else self.nav_btn_style)
+        self.btn_nav_config.setStyleSheet(self.active_btn_style if index == 4 else self.nav_btn_style)
+        self.btn_nav_setup.setStyleSheet(self.active_btn_style if index == 5 else self.nav_btn_style)
 
         if index != 2 and hasattr(self, 'video_frame'):
             self.video_frame.setPixmap(QPixmap()) 
             self.video_frame.setText("NO VIDEO SIGNAL")
+    
+    def request_all_params(self):
+        if not self.mav_worker or not self.mav_worker.connection:
+            QMessageBox.warning(self, "Error", "Cannot request parameters: No connection")
+            return
+            
+        self.param_tree.clear()
+        self.param_groups.clear()
+        self.param_tree_items.clear()
+        self.search_box.clear()
+        
+        self.mav_worker.connection.mav.param_request_list_send(
+            self.mav_worker.connection.target_system,
+            self.mav_worker.connection.target_component
+        )
+        self.append_log("<b style='color:#f39c12;'>[CONFIG] Loading parameter...</b>")
+
+    def search_params(self, text):
+        text = text.lower().strip()
+        for i in range(self.param_tree.topLevelItemCount()):
+            group = self.param_tree.topLevelItem(i)
+            group_match = False
+            
+            for j in range(group.childCount()):
+                child = group.child(j)
+                if text in child.text(0).lower() or text in child.text(1).lower():
+                    child.setHidden(False)
+                    group_match = True
+                else:
+                    child.setHidden(True)
+            
+            group.setHidden(not group_match)
+            if text and group_match:
+                group.setExpanded(True)
+            elif not text:
+                group.setExpanded(False)
+
+    def write_param(self, param_id, param_value):
+        if not self.mav_worker or not self.mav_worker.connection:
+            self.append_log("<span style='color:red;'>[CONFIG] Error message: Not connected</span>")
+            return
+
+        param_id_bytes = param_id.encode('utf-8')
+        
+        self.mav_worker.connection.mav.param_set_send(
+            self.mav_worker.connection.target_system,
+            self.mav_worker.connection.target_component,
+            param_id_bytes,
+            float(param_value),
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32 
+        )
+        self.append_log(f"<b style='color:#2ecc71;'>[CONFIG] Set command sent: {param_id} = {param_value}</b>")
+        if hasattr(self, 'tts_worker'):
+            self.tts_worker.speak(f"Parameter updated")
+
+    def action_write_selected_param(self):
+        selected = self.param_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Attention!", "Please click to select one parameter you wish to record!")
+            return
+            
+        item = selected[0]
+        pid = item.data(0, Qt.ItemDataRole.UserRole) 
+        
+        if not pid:
+            QMessageBox.warning(self, "Attention!", "Please open the folder and select a specific parameter!")
+            return
+            
+        try:
+            new_val = float(item.text(1))
+            self.write_param(pid, new_val)
+            item.setBackground(1, QColor("#1abc9c")) 
+            QTimer.singleShot(1000, lambda: item.setBackground(1, QColor(0,0,0,0)))
+        except ValueError:
+            QMessageBox.warning(self, "Error", "The value recorded must be a valid number!")
 
     def refresh_ports(self):
         new_ports = []
@@ -891,6 +1169,7 @@ class DroneApp(QMainWindow):
             
             self.mav_worker = MavlinkWorker(conn, baudrate=baud)
             self.page_mission.mav_worker = self.mav_worker
+            self.page_setup.mav_worker = self.mav_worker
             self.mav_worker.data_changed.connect(self.update_ui)
             
             self.mav_worker.connection_failed.connect(handle_connection_error)
@@ -969,6 +1248,12 @@ class DroneApp(QMainWindow):
             self.pfd.update()
             if hasattr(self, 'imu_graph'):
                 self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+
+            if hasattr(self, 'drone_3d'):
+                self.drone_3d.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+            
+            if hasattr(self, 'page_setup'):
+                self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
 
         elif t == 'VIBRATION':
             if hasattr(self, 'imu_graph') and all(k in data for k in ("vib_x", "vib_y", "vib_z")):
@@ -1055,11 +1340,36 @@ class DroneApp(QMainWindow):
             
         elif t in ['MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
             self.page_mission.handle_mission_msg(data)
+        
+        elif t == 'PARAM_VALUE':
+            pid = data.get("param_id")
+            pval = data.get("param_value")
             
-        # 3. UPDATE FLIGHT TIME
-        if self.pfd.is_armed:
-            secs = self.start_time.secsTo(QDateTime.currentDateTime())
-            self.lbl_time.setText(f"Flight Time: {secs//60:02d}:{secs%60:02d}")
+            if pid == "WPNAV_SPEED":
+                self.spin_wp_speed.setValue(pval)
+            
+            if pid in self.param_tree_items:
+                self.param_tree_items[pid].setText(1, str(pval))
+            else:
+                parts = pid.split('_', 1)
+                group_name = parts[0] if len(parts) > 1 else "OTHER"
+                
+                if group_name not in self.param_groups:
+                    group_item = QTreeWidgetItem([group_name, ""])
+                    group_item.setBackground(0, QColor("#34495e")) 
+                    group_item.setBackground(1, QColor("#34495e"))
+                    font = group_item.font(0); font.setBold(True); group_item.setFont(0, font)
+                    self.param_tree.addTopLevelItem(group_item)
+                    self.param_groups[group_name] = group_item
+
+                parent = self.param_groups[group_name]
+                child_item = QTreeWidgetItem(parent, [pid, str(pval)])
+                
+                child_item.setFlags(child_item.flags() | Qt.ItemFlag.ItemIsEditable) 
+                
+                child_item.setData(0, Qt.ItemDataRole.UserRole, pid) 
+                
+                self.param_tree_items[pid] = child_item
     
     def calc_distance(self, lat1, lon1, lat2, lon2):
         """Calculate the distance (in meters) between two GPS coordinates using the Haversine formula"""
