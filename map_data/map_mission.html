@@ -12,18 +12,18 @@
 <body>
     <div id="map"></div>
     <script>
-        var map = L.map('map', {fadeAnimation: false, zoomAnimation: false, markerZoomAnimation: false}).setView([16.0748, 108.1498], 17);
+        var map = L.map('map', {fadeAnimation: false, zoomAnimation: false, markerZoomAnimation: false, doubleClickZoom: false}).setView([16.0748, 108.1498], 17);
         
-        // --- BẢN ĐỒ VỆ TINH GOOGLE ---
         // L.tileLayer('https://www.google.cn/maps/vt?lyrs=s,h&x={x}&y={y}&z={z}', {
         //     maxZoom: 20,
         //     attribution: '© Google Earth'
         // }).addTo(map);
         L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            maxZoom: 19,
+            maxNativeZoom: 19,
+            maxZoom: 24,
             attribution: '© Esri & Earthstar Geographics'
         }).addTo(map);
-        // -----
+
         window.isDragging = false;
         var dragTimer;
         
@@ -52,8 +52,8 @@
                            </div>`;
             popup.setLatLng(e.latlng).setContent(content).openOn(map);
         });
-        // =========================================================================
 
+        // =========================================================================
         // --- WAYPOINT MANAGEMENT ---
         var wpPath = L.polyline([], {color:'#3498db', weight:4, opacity:0.8, dashArray: '8, 8'}).addTo(map);
         var markers = [];
@@ -69,16 +69,25 @@
             markers.forEach(m => map.removeLayer(m));
             markers = [];
             wpPath.setLatLngs([]);
+
+            zicZacMarkers.forEach(m => map.removeLayer(m));
+            zicZacMarkers = [];
+            zicZacPolygon.setLatLngs([]);
+            zicZacCoords = [];
         };
-        // ================== GEOFENCE) ==================
+
+        // =========================================================================
+        // --- GEOFENCE ---
         window.isDrawingFence = false;
         var fencePolygon = L.polygon([], {color: '#e74c3c', weight: 3, fillColor: '#c0392b', fillOpacity: 0.3, dashArray: '5, 5'}).addTo(map);
         var fenceMarkers = [];
 
         window.toggleFenceMode = function(state) {
             window.isDrawingFence = state;
-            if(state) map.getContainer().style.cursor = 'crosshair';
-            else map.getContainer().style.cursor = '';
+            if(state) {
+                window.isDrawingPoly = false; 
+                map.getContainer().style.cursor = 'crosshair';
+            } else map.getContainer().style.cursor = '';
         };
 
         window.addFencePoint = function(lat, lon, count) {
@@ -93,17 +102,60 @@
             fencePolygon.setLatLngs([]);
         };
 
-        // --- OVERWRITE THE CLICK EVENT TO CHOOSE BETWEEN DRAWING WP AND DRAWING FENCE ---
+        // =========================================================================
+        // --- POLYGON ZIG-ZAG SCANNING ---
+        window.isDrawingPoly = false;
+        var zicZacPolygon = L.polygon([], {color: '#9b59b6', weight: 3, fillColor: '#8e44ad', fillOpacity: 0.4}).addTo(map);
+        var zicZacMarkers = [];
+        var zicZacCoords = []; 
+
+        window.togglePolyMode = function(state) {
+            window.isDrawingPoly = state;
+            if(state) {
+                window.isDrawingFence = false;
+                zicZacPolygon.setLatLngs([]); 
+                zicZacMarkers.forEach(m => map.removeLayer(m));
+                zicZacMarkers = [];
+                zicZacCoords = [];
+                map.getContainer().style.cursor = 'crosshair';
+            } else {
+                map.getContainer().style.cursor = '';
+            }
+        };
+
+        // Double Click to finalize polygon and send coordinates to main app 
+        map.on('dblclick', function(e) {
+            if (window.isDrawingPoly && zicZacCoords.length >= 3) {
+                var coordsString = zicZacCoords.join('_');
+                window.location.href = "polygon://route/" + coordsString;
+                
+                window.togglePolyMode(false); 
+                map.getContainer().style.cursor = '';
+            }
+        });
+
+
+        // --- OVERWRITE THE CLICK EVENT ---
         map.off('click');
         map.on('click', function(e){
             if (!window.isDragging) {
                 if (window.isDrawingFence) {
                     window.location.href = "fence://" + e.latlng.lat + "/" + e.latlng.lng;
-                } else {
+                } 
+                else if (window.isDrawingPoly) {
+                    var lat = e.latlng.lat;
+                    var lng = e.latlng.lng;
+                    var m = L.circleMarker([lat, lng], {radius: 4, color: 'white', fillColor: '#8e44ad', fillOpacity: 1}).addTo(map);
+                    zicZacMarkers.push(m);
+                    zicZacPolygon.addLatLng([lat, lng]);
+                    zicZacCoords.push(lat + "," + lng); 
+                } 
+                else {
                     window.location.href = "wp://" + e.latlng.lat + "/" + e.latlng.lng;
                 }
             }
         });
+
         // =================================================================
         // --- REMOTE FUNCTIONS FROM MAIN ---
         function getDest(lat, lon, brng, dist) {
@@ -175,7 +227,6 @@
             headingLine.setLatLngs([p, getDest(lat, lon, heading, 5000)]);
             courseLine.setLatLngs([p, getDest(lat, lon, course, 5000)]);
             
-            // Auto scroll map if drone is more than 25m away from center and user is not dragging the map
             if (!window.isDragging) {
                 var center = map.getCenter();
                 if (map.distance(center, p) > 25) {
