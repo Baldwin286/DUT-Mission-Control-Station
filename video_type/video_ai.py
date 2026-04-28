@@ -3,7 +3,7 @@ from ultralytics import YOLO
 
 class AIProcessor:
     def __init__(self, model_path):
-        print(f"Đang nạp model YOLO từ: {model_path}")
+        print(f"Loading YOLO model from: {model_path}")
         self.model = YOLO(model_path)
 
     def process(self, frame):

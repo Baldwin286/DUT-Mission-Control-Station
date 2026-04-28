@@ -112,6 +112,7 @@ class MissionWebPage(QWebEnginePage):
         return super().acceptNavigationRequest(url, _type, isMainFrame)
 
 class MissionPlannerApp(QWidget):
+    mission_uploaded_signal = pyqtSignal(int)
     def __init__(self, mav_worker=None, log_callback=None):
         super().__init__()
         self.mav_worker = mav_worker; self.log_callback = log_callback 
@@ -266,6 +267,8 @@ class MissionPlannerApp(QWidget):
                 self.log(f"<b style='color:#2ecc71;'>DOWNLOAD SUCCESS!</b>"); self.clear_mission()
                 for wp in self.downloaded_wps: self.add_wp(wp['lat'], wp['lon'], wp['alt'])
         elif t == 'MISSION_ACK':
+            if self.uploading and msg.type == 0:
+                self.mission_uploaded_signal.emit(len(self.waypoints))
             self.uploading = False; self.downloading = False
             if msg.type == 0: self.log("<b style='color:#2ecc71;'>MISSION ACCEPTED!</b>")
             

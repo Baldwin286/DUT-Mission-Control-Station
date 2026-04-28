@@ -1,0 +1,16 @@
+{
+    "paths": {
+      "model_yolo": "F:\\PBL6\\model3\\yolo\\my_model.pt",
+      "flag_vn": "F:\\PBL_DATN\\Mavlink_app\\pictures\\VN_flag.jpg",
+      "flag_dut": "F:\\PBL_DATN\\Mavlink_app\\pictures\\image002.jpg",
+      "map_mcs": "F:\\PBL_DATN\\Mavlink_app\\map_data\\map_MCS.html",
+      "map_mission": "F:\\PBL_DATN\\Mavlink_app\\map_data\\map_mission.html",
+      "app_logo": "F:\\PBL_DATN\\Mavlink_app\\pictures\\logo_3.1.1.png"
+    },
+    "network": {
+      "companion_ip": "100.112.194.109",
+      "companion_port": 8888,
+      "video_stream_port": 9999,
+      "precision_landing_port": 5005
+    }
+  }

@@ -7,6 +7,8 @@ import time
 import threading
 import socket
 import csv
+import json
+import shutil
 
 # --- GPU and FFMPEG OPTIMIZED ---
 os.environ["QSG_RHI_BACKEND"] = "opengl"
@@ -18,9 +20,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFrame, QPushButton, QComboBox, 
                              QGridLayout, QTextEdit, QGroupBox, QStackedWidget,
                              QMessageBox, QDoubleSpinBox, QSizePolicy, 
-                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView)
-from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor, QVector3D
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPointF, QRectF, QDateTime, QTimer, QUrl
+                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog, QDialog)
+from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor, QVector3D, QBrush
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPointF, QRectF, QDateTime, QTimer, QUrl, QRect
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import pyqtgraph as pg
@@ -36,6 +38,15 @@ from module_function.voice_alert import TTSWorker
 from module_function.vibration_graph import IMUGraphWidget
 from module_function.flight_data_replay import FlightReplayWidget
 
+# ====================================================================================
+def load_config(config_file="config.json"):
+    if os.path.exists(config_file):
+        with open(config_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    else:
+        print(f"[WARNING] Not found {config_file}")
+        return {}
+CONFIG = load_config()
 # ====================================================================================
 # --- CLASS RECEIVES GSTREAMER/FFMPEG VIDEOS ---
 class VideoThread(QThread):
@@ -88,12 +99,19 @@ class VideoThread(QThread):
             # Buffer cleanup stream
             def clear_buffer():
                 while self.running and self.capture_active:
-                    ret, frame = cap.read()
-                    if ret:
-                        with self.frame_lock:
-                            self.latest_frame = frame 
-                    else:
-                        time.sleep(0.01)
+                    try:
+                        ret, frame = cap.read()
+                        if ret:
+                            with self.frame_lock:
+                                self.latest_frame = frame 
+                        else:
+                            time.sleep(0.01)
+                    except cv2.error as e:
+                        time.sleep(0.05) 
+                        continue
+                    except Exception as e:
+                        time.sleep(0.05)
+                        continue
 
             reader_thread = threading.Thread(target=clear_buffer, daemon=True)
             reader_thread.start()
@@ -145,11 +163,38 @@ class VideoThread(QThread):
         self.terminate() 
         self.wait()
 # ====================================================================================
+# --- GET ACCURATE ESTIMATED PI STOPPING LOCATION ---
+class PLReceiverThread(QThread):
+    data_received = pyqtSignal(dict)
 
+    def __init__(self, port=5005):
+        super().__init__()
+        self.port = port
+        self.running = True
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("0.0.0.0", self.port))
+        self.sock.settimeout(1.0)
+
+    def run(self):
+        print(f"[PL] Listening to Aruco coordinates on UDP {self.port}...")
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                json_data = json.loads(data.decode('utf-8'))
+                self.data_received.emit(json_data)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                pass
+
+    def stop(self):
+        self.running = False
+        self.wait()
+# ====================================================================================
 class MavlinkWorker(QThread):
     data_changed = pyqtSignal(dict)
-    
     connection_failed = pyqtSignal(str) 
+    link_status_changed = pyqtSignal(bool)
     
     def __init__(self, conn_string, baudrate=115200):
         super().__init__()
@@ -157,6 +202,8 @@ class MavlinkWorker(QThread):
         self.baudrate = baudrate
         self.running = True
         self.connection = None
+        self.last_msg_time = 0
+        self.is_link_lost = False
 
     def stop(self):
         self.running = False
@@ -166,114 +213,114 @@ class MavlinkWorker(QThread):
         self.wait()
 
     def run(self):
-        try:
-            import socket
-            socket.setdefaulttimeout(3.0) 
-
-            self.connection = mavutil.mavlink_connection(self.conn_string, baud=self.baudrate)
+        import socket
+        socket.setdefaulttimeout(3.0) 
+        
+        while self.running:
             try:
-                msg = self.connection.wait_heartbeat(timeout=3)
-                if not msg:
-                    raise Exception("No heartbeat received (Timeout)")
+                if self.connection is None:
+                    self.connection = mavutil.mavlink_connection(self.conn_string, baud=self.baudrate)
+                    msg = self.connection.wait_heartbeat(timeout=10)
+                    if not msg:
+                        raise Exception("No heartbeat received (Timeout)")
 
-                self.connection.mav.request_data_stream_send(
-                    self.connection.target_system, self.connection.target_component, 
-                    mavutil.mavlink.MAV_DATA_STREAM_ALL, 5, 1
-                )
-                self.connection.mav.request_data_stream_send(
-                    self.connection.target_system, self.connection.target_component, 
-                    mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, 10, 1
-                )
-                self.connection.mav.command_long_send(
-                    self.connection.target_system, self.connection.target_component,
-                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                    241, # Message ID VIBRATION
-                    100000, # Speed: 10Hz (ms)
-                    0, 0, 0, 0, 0
-                )
+                    self.connection.mav.request_data_stream_send(
+                        self.connection.target_system, self.connection.target_component, 
+                        mavutil.mavlink.MAV_DATA_STREAM_ALL, 5, 1
+                    )
+                    self.connection.mav.request_data_stream_send(
+                        self.connection.target_system, self.connection.target_component, 
+                        mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, 10, 1
+                    )
+                    self.connection.mav.command_long_send(
+                        self.connection.target_system, self.connection.target_component,
+                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, 241, 100000, 0, 0, 0, 0, 0
+                    )
+                    self.connection.mav.command_long_send(
+                        self.connection.target_system, self.connection.target_component,
+                        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, 124, 500000, 0, 0, 0, 0, 0
+                    )
+                    
+                    self.last_msg_time = time.time()
+                    if self.is_link_lost:
+                        self.is_link_lost = False
+                        self.link_status_changed.emit(True) 
+                
+                socket.setdefaulttimeout(None)
+
+                msg = self.connection.recv_match(blocking=True, timeout=0.5)
+                
+                if msg:
+                    self.last_msg_time = time.time()
+                    if self.is_link_lost:
+                        self.is_link_lost = False
+                        self.link_status_changed.emit(True)
+                        
+                    t = msg.get_type()
+                    src_sys = msg.get_srcSystem()
+                    d = {"type": t}
+                    
+                    if t == 'ATTITUDE':
+                        d.update({"r": math.degrees(msg.roll), "p": math.degrees(msg.pitch), "y": math.degrees(msg.yaw)})
+                    elif t == 'VFR_HUD':
+                        d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading})
+                    elif t == 'SYS_STATUS' and src_sys == 1:
+                        ekf_ok = bool(msg.onboard_control_sensors_health & (1 << 11))
+                        d.update({"v": msg.voltage_battery/1000.0, "a": msg.current_battery/100.0, "p": msg.battery_remaining, "ekf": ekf_ok})
+                    elif t == 'GPS_RAW_INT':
+                        hdop_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
+                        d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7, "cog": msg.cog / 100.0, "hdop": hdop_val})
+                    elif t == 'GPS2_RAW':
+                        hdop2_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
+                        d.update({"sats2": msg.satellites_visible, "hdop2": hdop2_val})
+                    elif t == 'GLOBAL_POSITION_INT':
+                        d.update({"rel_alt": msg.relative_alt / 1000.0})
+                    elif t == 'RAW_IMU':
+                        d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
+                    elif t == 'VIBRATION':
+                        d.update({"vib_x": msg.vibration_x, "vib_y": msg.vibration_y, "vib_z": msg.vibration_z})
+                    elif t == 'SCALED_IMU':  
+                        d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
+                    elif t == 'HEARTBEAT' and src_sys == 1:
+                        is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                        modes = {0:'STABILIZE', 1:'ACRO', 2:'ALT_HOLD', 3:'AUTO', 4:'GUIDED', 5:'LOITER', 6:'RTL', 7:'CIRCLE', 9:'LAND', 16:'POSHOLD', 17:'BRAKE'}
+                        curr_mode = modes.get(msg.custom_mode, f"MODE:{msg.custom_mode}")
+                        d.update({"mode": curr_mode, "armed": bool(is_armed)})
+                    elif t == 'STATUSTEXT':
+                        d.update({"status_msg": msg.text})
+                    elif t == 'RC_CHANNELS':
+                        chans = [msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw, msg.chan9_raw, msg.chan10_raw, msg.chan11_raw, msg.chan12_raw]
+                        rc_rssi = msg.rssi
+                        rssi_percent = 0
+                        if rc_rssi != 255 and rc_rssi > 0:
+                            rssi_percent = int((rc_rssi / 254.0) * 100)
+                        d.update({"chans": chans, "rssi": rssi_percent })
+                    elif t == 'NAV_CONTROLLER_OUTPUT':
+                        d.update({"wp_dist": msg.wp_dist})
+                    elif t == 'MISSION_CURRENT':
+                        d.update({"seq": msg.seq})
+                    elif t in ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
+                        d.update({"type": t, "msg_obj": msg})
+                    elif t == 'PARAM_VALUE':
+                        d.update({"param_id": msg.param_id, "param_value": msg.param_value, "param_type": msg.param_type})
+
+                    self.data_changed.emit(d)
+
+                else:
+                    if time.time() - self.last_msg_time > 3.0 and not self.is_link_lost:
+                        self.is_link_lost = True
+                        self.link_status_changed.emit(False)
+
             except Exception as e:
-                # Troubleshooting: No heartbeat or connection detected
-                self.data_changed.emit({"type": "LOG", "msg": f"<b style='color: red;'>Connection Failed: {str(e)}</b>"})
-                self.running = False
+                if not self.is_link_lost:
+                    self.is_link_lost = True
+                    self.link_status_changed.emit(False)
                 
                 if self.connection:
                     try: self.connection.close()
                     except: pass
-                
-                self.connection_failed.emit(str(e)) 
-                return 
-
-            socket.setdefaulttimeout(None)
-
-            while self.running:
-                msg = self.connection.recv_match(blocking=True, timeout=0.5)
-                if not msg: continue
-                
-                t = msg.get_type()
-                src_sys = msg.get_srcSystem()
-                d = {"type": t}
-                
-                if t == 'ATTITUDE':
-                    d.update({"r": math.degrees(msg.roll), "p": math.degrees(msg.pitch), "y": math.degrees(msg.yaw)})
-                elif t == 'VFR_HUD':
-                    d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading})
-                elif t == 'SYS_STATUS' and src_sys == 1:
-                    ekf_ok = bool(msg.onboard_control_sensors_health & (1 << 11))
-                    d.update({"v": msg.voltage_battery/1000.0, "a": msg.current_battery/100.0, "p": msg.battery_remaining, "ekf": ekf_ok})
-                elif t == 'GPS_RAW_INT':
-                    hdop_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
-                    d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7})
-                    d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7, "cog": msg.cog / 100.0, "hdop": hdop_val})
-                elif t == 'GLOBAL_POSITION_INT':
-                    # relative_alt millimeter (mm)/1000 -> m
-                    d.update({"rel_alt": msg.relative_alt / 1000.0})
-                elif t == 'RAW_IMU':
-                    d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
-                elif t == 'VIBRATION':
-                    d.update({"vib_x": msg.vibration_x, "vib_y": msg.vibration_y, "vib_z": msg.vibration_z})
-                elif t == 'SCALED_IMU':  
-                    d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
-                elif t == 'HEARTBEAT' and src_sys == 1:
-                    is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                    modes = {0:'STABILIZE', 1:'ACRO', 2:'ALT_HOLD', 3:'AUTO', 4:'GUIDED', 5:'LOITER', 6:'RTL', 7:'CIRCLE', 9:'LAND', 16:'POSHOLD', 17:'BRAKE'}
-                    curr_mode = modes.get(msg.custom_mode, f"MODE:{msg.custom_mode}")
-                    d.update({"mode": curr_mode, "armed": bool(is_armed)})
-                elif t == 'STATUSTEXT':
-                    d.update({"status_msg": msg.text})
-                elif t == 'RC_CHANNELS':
-                    chans = [msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw, msg.chan9_raw, msg.chan10_raw, msg.chan11_raw, msg.chan12_raw]
-                    
-                    rc_rssi = msg.rssi
-                    rssi_percent = 0
-                    
-                    if rc_rssi != 255 and rc_rssi > 0:
-                        rssi_percent = int((rc_rssi / 254.0) * 100)
-                    
-                    d.update({
-                        "chans": chans,
-                        "rssi": rssi_percent 
-                    })
-                elif t == 'NAV_CONTROLLER_OUTPUT':
-                    d.update({"wp_dist": msg.wp_dist})
-                elif t == 'MISSION_CURRENT':
-                    d.update({"seq": msg.seq})
-                elif t in ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
-                    d.update({"type": t, "msg_obj": msg})
-                elif t == 'PARAM_VALUE':
-                    d.update({
-                        "param_id": msg.param_id,
-                        "param_value": msg.param_value,
-                        "param_type": msg.param_type
-                    })
-
-                self.data_changed.emit(d)
-        except Exception as e:
-            self.data_changed.emit({"type": "LOG", "msg": f"<b style='color: red;'>Mavlink Error: {str(e)}</b>"})
-            self.running = False
-            if self.connection:
-                try: self.connection.close()
-                except: pass
-            self.connection_failed.emit(str(e))
+                self.connection = None
+                time.sleep(1.0)
 
 class PFDWidget(QWidget):
     def __init__(self):
@@ -286,6 +333,8 @@ class PFDWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.gps_hdop = 0.0 
+        self.gps2_sats = 0
+        self.gps2_hdop = 0.0
         self.rssi = 100
 
     def paintEvent(self, event):
@@ -344,7 +393,7 @@ class PFDWidget(QWidget):
         p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         p.setPen(Qt.GlobalColor.white)
         
-        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A  |  EKF: {self.ekf_status}  |  GPS: {self.gps_sats} (HDOP: {self.gps_hdop:.1f})  |  RSSI: {self.rssi}%"
+        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A  |  EKF: {self.ekf_status}  |  GPS1: {self.gps_sats}({self.gps_hdop:.1f}) GPS2: {self.gps2_sats}({self.gps2_hdop:.1f})  |  RSSI: {self.rssi}%"
         p.drawText(QRectF(0, h - hud_h, w, hud_h), Qt.AlignmentFlag.AlignCenter, combined_str)
         p.restore()
 
@@ -456,6 +505,106 @@ class FlightWebPage(QWebEnginePage):
             return False 
         return super().acceptNavigationRequest(url, _type, isMainFrame)
 
+class SlideToUnlockWidget(QWidget):
+    unlocked = pyqtSignal()
+
+    def __init__(self, text="SLIDE", handle_color="#c0392b", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(260, 45) 
+        
+        self.setStyleSheet("background: transparent;") 
+        
+        self.handle_color = QColor(handle_color)
+        self.bg_color = QColor("#2c3e50")
+        self.text = text
+        self.value = 0 
+        self.is_dragging = False
+        self.handle_width = 55 
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        w = self.width()
+        h = self.height()
+
+        p.setBrush(QBrush(self.bg_color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, w, h, 5, 5)
+
+        p.setPen(QPen(QColor(150, 150, 150)))
+        p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        p.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, self.text)
+
+        max_x = w - self.handle_width
+        x = int((self.value / 100.0) * max_x)
+        
+        p.setBrush(QBrush(self.handle_color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(x, 0, self.handle_width, h, 5, 5)
+
+        p.setPen(QPen(Qt.GlobalColor.white))
+        p.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        p.drawText(x, 0, self.handle_width, h, Qt.AlignmentFlag.AlignCenter, "»")
+        
+        p.end() 
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            max_x = self.width() - self.handle_width
+            x = int((self.value / 100.0) * max_x)
+            handle_rect = QRect(x, 0, self.handle_width, self.height())
+            
+            if handle_rect.contains(event.pos()):
+                self.is_dragging = True
+
+    def mouseMoveEvent(self, event):
+        if self.is_dragging:
+            max_x = self.width() - self.handle_width
+            x = event.pos().x() - self.handle_width // 2
+            
+            if x < 0: x = 0
+            if x > max_x: x = max_x
+            
+            self.value = (x / max_x) * 100
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.is_dragging:
+            self.is_dragging = False
+            if self.value > 85: 
+                self.value = 100
+                self.update()
+                self.unlocked.emit()
+                QTimer.singleShot(1000, self.reset_slider)
+            else:
+                self.reset_slider()
+
+    def reset_slider(self):
+        self.value = 0
+        self.update()
+
+
+class SlideConfirmDialog(QDialog):
+    def __init__(self, action_name, handle_color="#e74c3c", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("CONFIRM ORDER")
+        self.setFixedSize(300, 130)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+        self.setStyleSheet("background-color: #1e1e1e; color: white;")
+        
+        layout = QVBoxLayout(self)
+        
+        lbl = QLabel(f"Confirm order: {action_name}")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #ecf0f1; margin-bottom: 5px; background: transparent;")
+        layout.addWidget(lbl)
+        
+        self.slider = SlideToUnlockWidget(text=f"SLIDE TO {action_name}", handle_color=handle_color)
+        self.slider.unlocked.connect(self.accept) 
+        
+        layout.addWidget(self.slider, alignment=Qt.AlignmentFlag.AlignCenter)
+
 class DroneApp(QMainWindow):
     @staticmethod
     def get_lipo_s_count(voltage):
@@ -465,11 +614,12 @@ class DroneApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DUT MISSION CONTROL STATION V3.1")
+        self.setWindowTitle("DUT MISSION CONTROL STATION V3.1.1")
         self.resize(1280, 720)
         self.setStyleSheet("background-color: #121212; color: white;")
         
         self.mav_worker = None
+        self.pl_thread = None
         self.drone_pos = [16.0748, 108.1498]
         self.drone_heading = 0 
         self.drone_course = 0
@@ -482,6 +632,12 @@ class DroneApp(QMainWindow):
         self.csv_file = None
         self.csv_writer = None
         self.start_time = QDateTime.currentDateTime()
+
+        self.total_waypoints = 0
+        self.current_wp = 0
+        self.flight_timer = QTimer(self)
+        self.flight_timer.timeout.connect(self.update_flight_time)
+        self.flight_timer.start(1000)
 
         self.kml_file = None
         self.tts_worker = TTSWorker()
@@ -509,8 +665,9 @@ class DroneApp(QMainWindow):
             return
 
         # IP RASPBERRY PI
-        PI_IP = "192.168.1.22" 
-        PI_PORT = 8888
+        #PI_IP = "192.168.1.22" 
+        PI_IP = CONFIG.get("network", {}).get("companion_ip", "100.112.194.109")
+        PI_PORT = CONFIG.get("network", {}).get("companion_port", 8888)
         
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -559,7 +716,8 @@ class DroneApp(QMainWindow):
                     self.ai_log.append("<span style='color: #f39c12;'>[SYSTEM] Loading the AI ​​model into memory, please wait...</span>")
                     QApplication.processEvents() 
                 # LINK TO MODEL FILE
-                self.processor_ai = AIProcessor(model_path="F:\PBL6\model3\yolo\my_model.pt")
+                yolo_path = CONFIG.get("paths", {}).get("model_yolo", "")
+                self.processor_ai = AIProcessor(model_path=yolo_path)
             self.video_thread.set_processor(self.processor_ai)
 
         if hasattr(self, 'ai_log'):
@@ -571,25 +729,41 @@ class DroneApp(QMainWindow):
             QMessageBox.warning(self, "Warning", "You must TURN ON the camera before you can record!")
             return
             
-        # Automatically create the 'video_records' folder if it doesn't already exist
         if not os.path.exists("video_records"):
             os.makedirs("video_records")
             
         filename = f"video_records/video_record_{QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')}.avi"
+        self.current_video_temp_path = filename  
+        
         if hasattr(self, 'video_thread'):
             self.video_thread.start_recording(filename)
             self.btn_start_vrec.setStyleSheet("background: #c0392b; font-weight: bold; color: white; padding: 8px; border-radius: 5px;")
             self.btn_start_vrec.setText("RECORDING NOW...")
             if hasattr(self, 'ai_log'):
-                self.ai_log.append(f"<b style='color: #e67e22;'>[RECORD] Start recording video to a file: {filename}</b>")
+                self.ai_log.append(f"<b style='color: #e67e22;'>[RECORD] Start recording video...</b>")
 
     def stop_video_record(self):
         if hasattr(self, 'video_thread') and self.video_thread.is_recording:
             self.video_thread.stop_recording()
             self.btn_start_vrec.setStyleSheet("background: #34495e; font-weight: bold; color: white; padding: 8px; border-radius: 5px;")
             self.btn_start_vrec.setText("START RECORDING VIDEO")
-            if hasattr(self, 'ai_log'):
-                self.ai_log.append("<span style='color: #27ae60;'>[RECORD] Video Record successfully saved.</span>")
+            
+            if hasattr(self, 'current_video_temp_path') and os.path.exists(self.current_video_temp_path):
+                default_name = os.path.basename(self.current_video_temp_path)
+                save_path, _ = QFileDialog.getSaveFileName(
+                    self, "Choose a location to save the video", default_name, "AVI Files (*.avi);;All Files (*)"
+                )
+                if save_path:
+                    try:
+                        shutil.move(self.current_video_temp_path, save_path)
+                        if hasattr(self, 'ai_log'):
+                            self.ai_log.append(f"<span style='color: #27ae60;'>[RECORD] The video was saved at: {save_path}</span>")
+                    except Exception as e:
+                        if hasattr(self, 'ai_log'):
+                            self.ai_log.append(f"<span style='color: red;'>[RECORD] Error while saving: {e}</span>")
+                else:
+                    if hasattr(self, 'ai_log'):
+                        self.ai_log.append("<span style='color: #f39c12;'>[RECORD] The transfer has been canceled, but the original file remains in the video_records folder. </span>")
 
     def append_log(self, message):
         time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
@@ -642,7 +816,10 @@ class DroneApp(QMainWindow):
 
         top_row = QHBoxLayout()
         logos = QHBoxLayout()
-        paths = [r"F:\PBL_DATN\Mavlink_app\pictures\VN_flag.jpg", r"F:\PBL_DATN\Mavlink_app\pictures\image002.jpg"]
+        paths = [
+            CONFIG.get("paths", {}).get("flag_vn", "VN_flag.jpg"), 
+            CONFIG.get("paths", {}).get("flag_dut", "image002.jpg")
+        ]
         for p in paths:
             lbl = QLabel()
             if os.path.exists(p): lbl.setPixmap(QPixmap(p).scaled(60, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -701,9 +878,23 @@ class DroneApp(QMainWindow):
         self.btn_loiter = QPushButton("LOITER"); self.btn_loiter.setStyleSheet("background: #8e44ad; font-weight: bold; color: white; padding: 5px;")
         self.btn_loiter.clicked.connect(lambda: self.set_mode("LOITER"))
 
-        self.btn_arm.clicked.connect(lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1))
-        self.btn_disarm.clicked.connect(lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0))
-        self.btn_takeoff.clicked.connect(self.action_takeoff)
+        self.btn_arm.clicked.connect(lambda: self.confirm_and_send_cmd(
+            "ARM", "#c0392b", 
+            lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1)
+        ))
+        
+        self.btn_disarm.clicked.connect(lambda: self.confirm_and_send_cmd(
+            "DISARM", "#7f8c8d", 
+            lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0)
+        ))
+        
+        self.btn_takeoff.clicked.connect(lambda: self.confirm_and_send_cmd(
+            "TAKEOFF", "#27ae60", 
+            self.action_takeoff
+        ))
+        # self.btn_arm.clicked.connect(lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1))
+        # self.btn_disarm.clicked.connect(lambda: self.send_long_cmd(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0))
+        # self.btn_takeoff.clicked.connect(self.action_takeoff)
         self.btn_land.clicked.connect(lambda: self.set_mode("LAND"))
         self.btn_rtl.clicked.connect(lambda: self.set_mode("RTL"))
 
@@ -759,7 +950,7 @@ class DroneApp(QMainWindow):
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         # --- READ HTML MAP FILES ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        map_path = os.path.join(base_dir, "F:\PBL_DATN\Mavlink_app\map_data\map_MCS.html", "F:\PBL_DATN\Mavlink_app\map_data\map_mission.html")  # Đảm bảo đường dẫn đúng tới file HTML bản đồ
+        map_path = CONFIG.get("paths", {}).get("map_mcs", os.path.join(base_dir, "map_data", "map_MCS.html")) 
         self.map_view.load(QUrl.fromLocalFile(map_path))
         try:
             with open(map_path, "r", encoding="utf-8") as f:
@@ -784,6 +975,7 @@ class DroneApp(QMainWindow):
         # PAGE 1: MISSION PLANNER
         self.page_mission_container = QWidget(); mission_container_lay = QVBoxLayout(self.page_mission_container)
         self.page_mission = MissionPlannerApp(self.mav_worker, log_callback=self.append_log)
+        self.page_mission.mission_uploaded_signal.connect(self.force_update_wp_count)
         mission_container_lay.addWidget(self.page_mission, 4)
         mlg = QGroupBox("MISSION SYSTEM LOG"); mlg.setStyleSheet("color: #888; font-weight: bold; background: #1a1a1a;"); mll = QVBoxLayout(mlg)
         self.txt_mission_log = QTextEdit(); self.txt_mission_log.setReadOnly(True); self.txt_mission_log.setStyleSheet("background: black; color: #3498db; font-family: 'Consolas'; font-size: 11px; border: none;")
@@ -854,7 +1046,28 @@ class DroneApp(QMainWindow):
         rec_controls.addWidget(self.btn_start_vrec)
         rec_controls.addWidget(self.btn_stop_vrec)
         ap.addWidget(group_rec)
-        # ------------------------------------------
+        # ======================================================================
+        # --- MODULE 4: PRECISION LANDING ---
+        group_pl = QGroupBox("4. PRECISION LANDING")
+        group_pl.setStyleSheet("QGroupBox { font-weight: bold; color: #ecf0f1; border: 1px solid #7f8c8d; border-radius: 5px; margin-top: 10px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
+        pl_layout = QVBoxLayout(group_pl)
+
+        self.btn_pl_toggle = QPushButton("ENABLE PRECISION LANDING")
+        self.btn_pl_toggle.setCheckable(True)
+        self.btn_pl_toggle.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 8px; border-radius: 5px;")
+        self.btn_pl_toggle.clicked.connect(self.toggle_precision_landing)
+
+        self.lbl_pl_status = QLabel("Status: STANDBY")
+        self.lbl_pl_status.setStyleSheet("color: #f39c12; font-weight: bold; font-size: 13px;")
+        
+        self.lbl_pl_data = QLabel("X: 0.00 | Y: 0.00 | Dist: 0.00m")
+        self.lbl_pl_data.setStyleSheet("color: #bdc3c7; font-size: 12px;")
+
+        pl_layout.addWidget(self.btn_pl_toggle)
+        pl_layout.addWidget(self.lbl_pl_status)
+        pl_layout.addWidget(self.lbl_pl_data)
+        ap.addWidget(group_pl)
+        # ======================================================================
 
         self.ai_log = QTextEdit("System Ready..."); self.ai_log.setReadOnly(True); self.ai_log.setStyleSheet("background: #1e1e1e; color: #2ecc71; font-family: 'Consolas'; font-size: 12px; border: 1px solid #333; border-radius: 5px;")
         ap.addWidget(self.ai_log); vl.addWidget(self.video_frame, 3); vl.addLayout(ap, 1); self.stacked_widget.addWidget(self.page_video)
@@ -890,13 +1103,13 @@ class DroneApp(QMainWindow):
         
         quick_lay.addWidget(QLabel("Auto Flight Speed (WPNAV_SPEED):"))
         self.spin_wp_speed = QDoubleSpinBox()
-        self.spin_wp_speed.setRange(0, 5000)
-        self.spin_wp_speed.setSuffix(" cm/s")
+        self.spin_wp_speed.setRange(0, 50)
+        self.spin_wp_speed.setSuffix(" m/s")
         self.spin_wp_speed.setMinimumWidth(150)
         
         self.btn_set_wp_speed = QPushButton("SET SPEED")
         self.btn_set_wp_speed.setStyleSheet("background: #d35400; font-weight: bold; color: white; padding: 5px;")
-        self.btn_set_wp_speed.clicked.connect(lambda: self.write_param("WPNAV_SPEED", self.spin_wp_speed.value()))
+        self.btn_set_wp_speed.clicked.connect(lambda: self.write_param("WPNAV_SPEED", self.spin_wp_speed.value() * 100.0))
         
         quick_lay.addWidget(self.spin_wp_speed)
         quick_lay.addWidget(self.btn_set_wp_speed)
@@ -939,36 +1152,67 @@ class DroneApp(QMainWindow):
         self.stacked_widget.addWidget(self.page_setup)
         self.switch_page(0)
 
+    def update_flight_time(self):
+        if hasattr(self, 'pfd') and self.pfd.is_armed and hasattr(self, 'start_time'):
+            elapsed_ms = self.start_time.msecsTo(QDateTime.currentDateTime())
+            total_seconds = elapsed_ms // 1000
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            
+            if hasattr(self, 'lbl_time'):
+                self.lbl_time.setText(f"Flight Time: {minutes:02d}:{seconds:02d}")
+        elif hasattr(self, 'pfd') and not self.pfd.is_armed:
+            if hasattr(self, 'lbl_time') and self.lbl_time.text() != "Flight Time: 00:00":
+                self.lbl_time.setText("Flight Time: 00:00")
+
+    def handle_link_status(self, is_connected):
+        if is_connected:
+            self.btn_connect.setText("DISCONNECT")
+            self.btn_connect.setStyleSheet("background-color: #e74c3c; font-weight: bold; padding: 10px 20px; border-radius: 5px;")
+            self.append_log("<b style='color: #2ecc71;'>[SYSTEM] Telemetry Link Recovered!</b>")
+            if hasattr(self, 'tts_worker'):
+                self.tts_worker.speak("Telemetry link recovered")
+        else:
+            self.btn_connect.setText("RECONNECTING...")
+            self.btn_connect.setStyleSheet("background-color: #f39c12; font-weight: bold; padding: 10px 20px; border-radius: 5px;")
+            self.pfd.flight_mode = "LINK LOST"
+            self.pfd.update()
+            self.append_log("<b style='color: #f39c12;'>[SYSTEM] Telemetry Link Lost! Reconnecting...</b>")
+            if hasattr(self, 'tts_worker'):
+                self.tts_worker.speak("Warning, telemetry link lost")
+    
+    def force_update_wp_count(self, new_total):
+        self.total_waypoints = new_total
+        self.lbl_wp.setText(f"Waypoint: {self.current_wp} / {self.total_waypoints}")
+        self.append_log(f"<b style='color:#3498db;'>[MISSION] System updated to {new_total} waypoints.</b>")
+
     def toggle_record(self):
         if not self.is_recording:
             time_str = QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')
             
-            # 1. Create Telemetry_Logs folder automatically
             base_dir = os.path.dirname(os.path.abspath(__file__))
             log_dir = os.path.join(base_dir, "Telemetry_Logs")
             if not os.path.exists(log_dir):
                 os.makedirs(log_dir)
                 
-            # 2. Force absolute paths for CSV and KML files
-            csv_filename = os.path.join(log_dir, f"telemetry_{time_str}.csv")
-            kml_filename = os.path.join(log_dir, f"trajectory_{time_str}.kml")
+            self.current_csv_temp_path = os.path.join(log_dir, f"telemetry_{time_str}.csv")
+            self.current_kml_temp_path = os.path.join(log_dir, f"trajectory_{time_str}.kml")
             
             try:
                 # CSV
-                self.csv_file = open(csv_filename, 'w', newline='')
+                self.csv_file = open(self.current_csv_temp_path, 'w', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
                 self.csv_writer.writerow(['Timestamp', 'Mode', 'Armed', 'Alt', 'Spd', 'Yaw', 'Lat', 'Lon', 'Volt', 'HDOP', 'RSSI'])
                 
                 # KML
-                self.kml_file = open(kml_filename, 'w')
+                self.kml_file = open(self.current_kml_temp_path, 'w')
                 self.kml_file.write('<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n<Document>\n<name>Flight Trajectory</name>\n<Placemark>\n<LineString>\n<extrude>1</extrude>\n<tessellate>1</tessellate>\n<altitudeMode>relativeToGround</altitudeMode>\n<coordinates>\n')
                 
                 self.is_recording = True
                 self.btn_record_telemetry.setText("STOP TELEMETRY LOG")
                 self.btn_record_telemetry.setStyleSheet("background: #e74c3c; font-weight: bold; color: white; padding: 15px; border-radius: 5px;")
                 
-                # 3. Inform link on logging start with a clickable path
-                self.append_log(f"Recording started. Files saved at: <b style='color:#f39c12;'>{log_dir}</b>")
+                self.append_log("Telemetry recording started...")
                 if hasattr(self, 'tts_worker'):
                     self.tts_worker.speak("Telemetry recording started")
                     
@@ -977,14 +1221,28 @@ class DroneApp(QMainWindow):
         else:
             self.is_recording = False
             if self.csv_file: self.csv_file.close()
-            # Close tag KML
             if self.kml_file:
                 self.kml_file.write('\n</coordinates>\n</LineString>\n</Placemark>\n</Document>\n</kml>')
                 self.kml_file.close()
                 
             self.btn_record_telemetry.setText("START TELEMETRY LOG")
             self.btn_record_telemetry.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 15px; border-radius: 5px;")
-            self.append_log("Recording stopped and saved successfully.")
+            
+            folder_path = QFileDialog.getExistingDirectory(self, "Choose a folder to save the Telemetry files")
+            
+            if folder_path:
+                try:
+                    new_csv = os.path.join(folder_path, os.path.basename(self.current_csv_temp_path))
+                    new_kml = os.path.join(folder_path, os.path.basename(self.current_kml_temp_path))
+                    
+                    shutil.move(self.current_csv_temp_path, new_csv)
+                    shutil.move(self.current_kml_temp_path, new_kml)
+                    self.append_log(f"The Telemetry file has been moved: <b style='color:#f39c12;'>{folder_path}</b>")
+                except Exception as e:
+                    self.append_log(f"Error saving telemetry file: {e}")
+            else:
+                self.append_log("Even after de-saving, temporary files remain in the Telemetry_Logs folder.")
+
             if hasattr(self, 'tts_worker'):
                 self.tts_worker.speak("Telemetry recording stopped")
 
@@ -1024,6 +1282,86 @@ class DroneApp(QMainWindow):
         if index != 2 and hasattr(self, 'video_frame'):
             self.video_frame.setPixmap(QPixmap()) 
             self.video_frame.setText("NO VIDEO SIGNAL")
+
+    # ======================================================================
+    # --- PRECISION LANDING HANDLER ---
+    def toggle_precision_landing(self, checked):
+        if checked:
+            if not self.mav_worker or not self.mav_worker.connection:
+                QMessageBox.warning(self, "Warning", "Please connect the system before enabling the Landing function!")
+                self.btn_pl_toggle.setChecked(False)
+                return
+                
+            self.btn_pl_toggle.setText("DISABLE PRECISION LANDING")
+            self.btn_pl_toggle.setStyleSheet("background: #e74c3c; font-weight: bold; color: white; padding: 8px; border-radius: 5px;")
+            self.lbl_pl_status.setText("Status: LISTENING (UDP 5005)")
+            self.lbl_pl_status.setStyleSheet("color: #3498db; font-weight: bold;")
+            
+            self.pl_thread = PLReceiverThread(port=5005)
+            self.pl_thread.data_received.connect(self.update_pl_ui)
+            self.pl_thread.start()
+            if hasattr(self, 'ai_log'):
+                self.ai_log.append("<span style='color: #3498db;'>[PL] Activated Precision Landing listener...</span>")
+        else:
+            self.btn_pl_toggle.setText("ENABLE PRECISION LANDING")
+            self.btn_pl_toggle.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 8px; border-radius: 5px;")
+            self.lbl_pl_status.setText("Status: STANDBY")
+            self.lbl_pl_status.setStyleSheet("color: #f39c12; font-weight: bold;")
+            self.lbl_pl_data.setText("X: 0.00 | Y: 0.00 | Dist: 0.00m")
+            
+            if self.pl_thread:
+                self.pl_thread.stop()
+                self.pl_thread = None
+            
+            if self.mav_worker and self.mav_worker.connection:
+                self.mav_worker.connection.mav.rc_channels_override_send(
+                    self.mav_worker.connection.target_system,
+                    self.mav_worker.connection.target_component,
+                    0, 0, 0, 0, 0, 0, 0, 0
+                )
+            if hasattr(self, 'ai_log'):
+                self.ai_log.append("<span style='color: #e74c3c;'>[PL] Deactivated Precision Landing.</span>")
+
+    def update_pl_ui(self, data):
+        is_tracking = data.get("tracking", False)
+        if is_tracking:
+            self.lbl_pl_status.setText("Status: TARGET LOCKED")
+            self.lbl_pl_status.setStyleSheet("color: #2ecc71; font-weight: bold;")
+            
+            x, y, dist = data.get("x", 0.0), data.get("y", 0.0), data.get("dist", 0.0)
+            self.lbl_pl_data.setText(f"X: {x:.2f} | Y: {y:.2f} | Dist: {dist:.2f}m")
+            
+            if self.mav_worker and self.mav_worker.connection:
+                Kp = 60 
+                rc_roll = 1500 + int(x * Kp)  
+                rc_pitch = 1500 - int(y * Kp) 
+                
+                rc_roll = max(1420, min(1580, rc_roll))
+                rc_pitch = max(1420, min(1580, rc_pitch))
+                
+                if abs(x) < 0.2 and abs(y) < 0.2 and dist > 0.5:
+                    rc_throttle = 1450 
+                elif dist <= 0.5 and dist > 0.0:
+                    rc_throttle = 1300 
+                else:
+                    rc_throttle = 1500 
+                
+                self.mav_worker.connection.mav.rc_channels_override_send(
+                    self.mav_worker.connection.target_system,
+                    self.mav_worker.connection.target_component,
+                    rc_roll, rc_pitch, rc_throttle, 
+                    0, 0, 0, 0, 0
+                )
+        else:
+            self.lbl_pl_status.setText("Status: TARGET LOST")
+            self.lbl_pl_status.setStyleSheet("color: #e74c3c; font-weight: bold;")
+            if self.mav_worker and self.mav_worker.connection:
+                self.mav_worker.connection.mav.rc_channels_override_send(
+                    self.mav_worker.connection.target_system,
+                    self.mav_worker.connection.target_component,
+                    0, 0, 0, 0, 0, 0, 0, 0
+                )
+    # ======================================================================
     
     def request_all_params(self):
         if not self.mav_worker or not self.mav_worker.connection:
@@ -1173,6 +1511,7 @@ class DroneApp(QMainWindow):
             self.mav_worker.data_changed.connect(self.update_ui)
             
             self.mav_worker.connection_failed.connect(handle_connection_error)
+            self.mav_worker.link_status_changed.connect(self.handle_link_status)
             
             self.mav_worker.start()
             
@@ -1315,7 +1654,12 @@ class DroneApp(QMainWindow):
             if self.home_pos is not None:
                 dist = self.calc_distance(self.home_pos[0], self.home_pos[1], self.drone_pos[0], self.drone_pos[1])
                 self.val_dist_mav.setText(f"{dist:.1f}") 
-            
+        
+        elif t == 'GPS2_RAW':
+                self.pfd.gps2_sats = data.get('sats2', 0)
+                self.pfd.gps2_hdop = data.get('hdop2', 0.0)
+                self.pfd.update()
+
         elif t == 'RADIO_STATUS':
             self.pfd.rssi = data.get('rssi', 0)
             
@@ -1336,9 +1680,17 @@ class DroneApp(QMainWindow):
             self.val_dist_wp.setText(f"{data.get('wp_dist', 0):.1f}")
             
         elif t == 'MISSION_CURRENT':
-            self.lbl_wp.setText(f"Waypoint: {data.get('seq', 0)} / --")
+            self.current_wp = data.get('seq', 0)
+            total_str = str(self.total_waypoints) if self.total_waypoints > 0 else "--"
+            self.lbl_wp.setText(f"Waypoint: {self.current_wp} / {total_str}")
             
         elif t in ['MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
+            if t == 'MISSION_COUNT':
+                msg_obj = data.get('msg_obj')
+                if msg_obj:
+                    self.total_waypoints = msg_obj.count
+                    self.lbl_wp.setText(f"Waypoint: {self.current_wp} / {self.total_waypoints}")
+                    
             self.page_mission.handle_mission_msg(data)
         
         elif t == 'PARAM_VALUE':
@@ -1346,7 +1698,7 @@ class DroneApp(QMainWindow):
             pval = data.get("param_value")
             
             if pid == "WPNAV_SPEED":
-                self.spin_wp_speed.setValue(pval)
+                self.spin_wp_speed.setValue(pval / 100.0)
             
             if pid in self.param_tree_items:
                 self.param_tree_items[pid].setText(1, str(pval))
@@ -1413,7 +1765,15 @@ class DroneApp(QMainWindow):
             self.video_thread.stop()
         if self.mav_worker:
             self.mav_worker.stop()
+        if hasattr(self, 'pl_thread') and self.pl_thread:
+            self.pl_thread.stop()
         event.accept()
+    
+    def confirm_and_send_cmd(self, action_name, color, cmd_func):
+        dialog = SlideConfirmDialog(action_name, color, self)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            cmd_func()
     
 if __name__ == "__main__":
     try:
@@ -1425,15 +1785,25 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     
+    logo_path = CONFIG.get("paths", {}).get("app_logo", "logo.png")
+    
     # --- 1. SET ICON ---
     from PyQt6.QtGui import QIcon, QPixmap
     from PyQt6.QtWidgets import QSplashScreen
+    import os
     
-    app_icon = QIcon(r"F:\PBL_DATN\Mavlink_app\pictures\logo.png") 
-    app.setWindowIcon(app_icon)
+    if os.path.exists(logo_path):
+        app_icon = QIcon(logo_path) 
+        app.setWindowIcon(app_icon)
+        splash_pix = QPixmap(logo_path)
+    else:
+        app_icon = QIcon() 
+        app.setWindowIcon(app_icon)
+        splash_pix = QPixmap(500, 500)
+        splash_pix.fill(Qt.GlobalColor.black)
+        print(f"[WARNING] Logo file not found: {logo_path}")
 
     # --- 2. SPLASH SCREEN ---
-    splash_pix = QPixmap(r"F:\PBL_DATN\Mavlink_app\pictures\logo.png") 
     splash_pix = splash_pix.scaled(500, 500, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
     
     splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
