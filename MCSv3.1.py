@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFrame, QPushButton, QComboBox, 
                              QGridLayout, QTextEdit, QGroupBox, QStackedWidget,
                              QMessageBox, QDoubleSpinBox, QSizePolicy, 
-                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog, QDialog)
+                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog, QDialog, QSplitter, QTabWidget)
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor, QVector3D, QBrush
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPointF, QRectF, QDateTime, QTimer, QUrl, QRect
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
@@ -205,6 +205,8 @@ class MavlinkWorker(QThread):
         self.last_msg_time = 0
         self.is_link_lost = False
 
+        self.last_gcs_heartbeat = 0
+        self.version_logged = False
     def stop(self):
         self.running = False
         if self.connection:
@@ -218,11 +220,51 @@ class MavlinkWorker(QThread):
         
         while self.running:
             try:
+                # if self.connection is None:
+                #     self.connection = mavutil.mavlink_connection(self.conn_string, baud=self.baudrate)
+                #     msg = self.connection.wait_heartbeat(timeout=10)
+                #     if not msg:
+                #         raise Exception("No heartbeat received (Timeout)")
                 if self.connection is None:
                     self.connection = mavutil.mavlink_connection(self.conn_string, baud=self.baudrate)
-                    msg = self.connection.wait_heartbeat(timeout=10)
-                    if not msg:
+                    start_wait = time.time()
+                    heartbeat_found = False
+                    while time.time() - start_wait < 5.0:
+                        m = self.connection.recv_match(blocking=True, timeout=0.1)
+                        if m and m.get_type() == 'HEARTBEAT' and m.get_srcComponent() == 1:
+                            self.connection.target_system = m.get_srcSystem()
+                            self.connection.target_component = 1
+                            heartbeat_found = True
+                            break
+                            
+                    if not heartbeat_found:
                         raise Exception("No heartbeat received (Timeout)")
+                    self.connection.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                        0, 0, 0
+                    )
+                    self.last_gcs_heartbeat = time.time()
+                    self.connection.mav.request_data_stream_send(
+                        self.connection.target_system, self.connection.target_component, 
+                        mavutil.mavlink.MAV_DATA_STREAM_ALL, 5, 1
+                    )
+                    self.connection.mav.request_data_stream_send(
+                        self.connection.target_system, self.connection.target_component, 
+                        mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, 10, 1
+                    )
+                    self.connection.mav.autopilot_version_request_send(
+                        self.connection.target_system, self.connection.target_component
+                    )
+                    self.connection.mav.param_request_list_send(
+                        self.connection.target_system, self.connection.target_component
+                    )
+                    # ---------------------------------------
+                    
+                    self.last_msg_time = time.time()
+                    if self.is_link_lost:
+                        self.is_link_lost = False
+                        self.link_status_changed.emit(True)
 
                     self.connection.mav.request_data_stream_send(
                         self.connection.target_system, self.connection.target_component, 
@@ -231,6 +273,11 @@ class MavlinkWorker(QThread):
                     self.connection.mav.request_data_stream_send(
                         self.connection.target_system, self.connection.target_component, 
                         mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS, 10, 1
+                    )
+                    self.connection.mav.command_long_send(
+                        self.connection.target_system, 1,
+                        mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE, 0,
+                        148, 0, 0, 0, 0, 0, 0  
                     )
                     self.connection.mav.command_long_send(
                         self.connection.target_system, self.connection.target_component,
@@ -256,20 +303,56 @@ class MavlinkWorker(QThread):
                         self.is_link_lost = False
                         self.link_status_changed.emit(True)
                         
+                    # t = msg.get_type()
+                    # src_sys = msg.get_srcSystem()
+                    # d = {"type": t}
+                    
+                    # if t == 'ATTITUDE':
+                    #     d.update({"r": math.degrees(msg.roll), "p": math.degrees(msg.pitch), "y": math.degrees(msg.yaw)})
+                    # elif t == 'VFR_HUD':
+                    #     d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading})
+                    # elif t == 'SYS_STATUS' and src_sys == 1:
+                    #     ekf_ok = bool(msg.onboard_control_sensors_health & (1 << 11))
+                    #     rc_ok = bool(msg.onboard_control_sensors_health & mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER)
+                    #     d.update({"v": msg.voltage_battery/1000.0, "a": msg.current_battery/100.0, "p": msg.battery_remaining, "ekf": ekf_ok, "rc_ok": rc_ok})
+                    # elif t == 'GPS_RAW_INT':
+                    #     hdop_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
+                    #     fix_type = msg.fix_type
+                    #     d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7, "cog": msg.cog / 100.0, "hdop": hdop_val, "fix_type": fix_type})
+                    # elif t == 'GPS2_RAW':
+                    #     hdop2_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
+                    #     d.update({"sats2": msg.satellites_visible, "hdop2": hdop2_val})
+                    # elif t == 'GLOBAL_POSITION_INT':
+                    #     d.update({"rel_alt": msg.relative_alt / 1000.0})
+                    # elif t == 'RAW_IMU':
+                    #     d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
+                    # elif t == 'VIBRATION':
+                    #     d.update({"vib_x": msg.vibration_x, "vib_y": msg.vibration_y, "vib_z": msg.vibration_z})
+                    # elif t == 'SCALED_IMU':  
+                    #     d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
+                    # elif t == 'HEARTBEAT' and src_sys == 1:
+                    #     is_armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                        
+                    #     modes = {0:'STABILIZE', 1:'ACRO', 2:'ALT_HOLD', 3:'AUTO', 4:'GUIDED', 5:'LOITER', 6:'RTL', 7:'CIRCLE', 9:'LAND', 16:'POSHOLD', 17:'BRAKE'}
+                    #     curr_mode = modes.get(msg.custom_mode, f"MODE:{msg.custom_mode}")
+                    #     d.update({"mode": curr_mode, "armed": is_armed}) 
                     t = msg.get_type()
                     src_sys = msg.get_srcSystem()
+                    src_comp = msg.get_srcComponent() 
                     d = {"type": t}
                     
                     if t == 'ATTITUDE':
                         d.update({"r": math.degrees(msg.roll), "p": math.degrees(msg.pitch), "y": math.degrees(msg.yaw)})
                     elif t == 'VFR_HUD':
                         d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading})
-                    elif t == 'SYS_STATUS' and src_sys == 1:
+                    elif t == 'SYS_STATUS' and src_comp == 1:
                         ekf_ok = bool(msg.onboard_control_sensors_health & (1 << 11))
-                        d.update({"v": msg.voltage_battery/1000.0, "a": msg.current_battery/100.0, "p": msg.battery_remaining, "ekf": ekf_ok})
+                        rc_ok = bool(msg.onboard_control_sensors_health & mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER)
+                        d.update({"v": msg.voltage_battery/1000.0, "a": msg.current_battery/100.0, "p": msg.battery_remaining, "ekf": ekf_ok, "rc_ok": rc_ok})
                     elif t == 'GPS_RAW_INT':
                         hdop_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
-                        d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7, "cog": msg.cog / 100.0, "hdop": hdop_val})
+                        fix_type = msg.fix_type
+                        d.update({"sats": msg.satellites_visible, "lat": msg.lat/1e7, "lon": msg.lon/1e7, "cog": msg.cog / 100.0, "hdop": hdop_val, "fix_type": fix_type})
                     elif t == 'GPS2_RAW':
                         hdop2_val = msg.eph / 100.0 if msg.eph != 65535 else 0.0
                         d.update({"sats2": msg.satellites_visible, "hdop2": hdop2_val})
@@ -281,13 +364,20 @@ class MavlinkWorker(QThread):
                         d.update({"vib_x": msg.vibration_x, "vib_y": msg.vibration_y, "vib_z": msg.vibration_z})
                     elif t == 'SCALED_IMU':  
                         d.update({"acc_x": msg.xacc, "acc_y": msg.yacc, "acc_z": msg.zacc})
-                    elif t == 'HEARTBEAT' and src_sys == 1:
-                        is_armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                    elif t == 'HEARTBEAT' and src_comp == 1:
+                        is_armed = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
                         modes = {0:'STABILIZE', 1:'ACRO', 2:'ALT_HOLD', 3:'AUTO', 4:'GUIDED', 5:'LOITER', 6:'RTL', 7:'CIRCLE', 9:'LAND', 16:'POSHOLD', 17:'BRAKE'}
                         curr_mode = modes.get(msg.custom_mode, f"MODE:{msg.custom_mode}")
-                        d.update({"mode": curr_mode, "armed": bool(is_armed)})
+                        d.update({"mode": curr_mode, "armed": is_armed})
+
                     elif t == 'STATUSTEXT':
-                        d.update({"status_msg": msg.text})
+                        #d.update({"status_msg": msg.text})
+                        status_msg = msg.text
+                        sys_keywords = ["ArduCopter V", "Matek", "Frame:", "ChibiOS", "RCOut:"]
+                        if any(kw in status_msg for kw in sys_keywords):
+                            d.update({"type": "LOG", "msg": f"<b style='color: #e67e22;'>[SYS] {status_msg}</b>"})
+                        else:
+                            d.update({"status_msg": status_msg})
                     elif t == 'RC_CHANNELS':
                         chans = [msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw, msg.chan9_raw, msg.chan10_raw, msg.chan11_raw, msg.chan12_raw]
                         rc_rssi = msg.rssi
@@ -303,7 +393,13 @@ class MavlinkWorker(QThread):
                         d.update({"type": t, "msg_obj": msg})
                     elif t == 'PARAM_VALUE':
                         d.update({"param_id": msg.param_id, "param_value": msg.param_value, "param_type": msg.param_type})
-
+                    elif t == 'AUTOPILOT_VERSION':
+                        if not getattr(self, 'version_logged', False): 
+                            major = (msg.flight_sw_version >> 24) & 0xFF
+                            minor = (msg.flight_sw_version >> 16) & 0xFF
+                            patch = (msg.flight_sw_version >> 8) & 0xFF
+                            d.update({"type": "LOG", "msg": f"<b style='color: #f1c40f;'>[SYS INFO] ArduPilot V{major}.{minor}.{patch}</b>"})
+                            self.version_logged = True 
                     self.data_changed.emit(d)
 
                 else:
@@ -312,6 +408,9 @@ class MavlinkWorker(QThread):
                         self.link_status_changed.emit(False)
 
             except Exception as e:
+                if not self.running:
+                    break
+
                 if not self.is_link_lost:
                     self.is_link_lost = True
                     self.link_status_changed.emit(False)
@@ -320,6 +419,7 @@ class MavlinkWorker(QThread):
                     try: self.connection.close()
                     except: pass
                 self.connection = None
+                self.version_logged = False
                 time.sleep(1.0)
 
 class PFDWidget(QWidget):
@@ -336,6 +436,7 @@ class PFDWidget(QWidget):
         self.gps2_sats = 0
         self.gps2_hdop = 0.0
         self.rssi = 100
+        self.gps_fix_type = 0
 
     def paintEvent(self, event):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -393,7 +494,10 @@ class PFDWidget(QWidget):
         p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         p.setPen(Qt.GlobalColor.white)
         
-        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A  |  EKF: {self.ekf_status}  |  GPS1: {self.gps_sats}({self.gps_hdop:.1f}) GPS2: {self.gps2_sats}({self.gps2_hdop:.1f})  |  RSSI: {self.rssi}%"
+        fix_dict = {0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK Flt", 6: "RTK Fix"}
+        fix_str = fix_dict.get(self.gps_fix_type, "Unk")
+
+        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A ({self.batt_p}%)  |  EKF: {self.ekf_status}  |  GPS1: {self.gps_sats} {fix_str} ({self.gps_hdop:.1f}) GPS2: {self.gps2_sats}({self.gps2_hdop:.1f})  |  RSSI: {self.rssi}%"
         p.drawText(QRectF(0, h - hud_h, w, hud_h), Qt.AlignmentFlag.AlignCenter, combined_str)
         p.restore()
 
@@ -632,6 +736,7 @@ class DroneApp(QMainWindow):
         self.csv_file = None
         self.csv_writer = None
         self.start_time = QDateTime.currentDateTime()
+        self.rc_healthy = True #Check if RC is healthy for TTS alert
 
         self.total_waypoints = 0
         self.current_wp = 0
@@ -1616,6 +1721,10 @@ class DroneApp(QMainWindow):
             self.pfd.batt_a = data.get('a', 0)
             self.pfd.batt_p = data.get('p', 0)
             self.pfd.ekf_status = "OK" if data.get('ekf', False) else "BAD"
+
+            self.rc_healthy = data.get('rc_ok', True)
+            if not self.rc_healthy:
+                self.pfd.rssi = 0
             if 0 < self.pfd.batt_p < 20 and hasattr(self, 'tts_worker'):
                  self.tts_worker.speak("Warning, battery low")
                  
@@ -1635,7 +1744,8 @@ class DroneApp(QMainWindow):
         elif t == 'GPS_RAW_INT':
             self.pfd.gps_sats = data.get('sats', 0)
             self.pfd.gps_hdop = data.get('hdop', 0.0) # HDOP
-            
+            self.pfd.gps_fix_type = data.get('fix_type', 0) #GPS FIX TYPE
+
             # --- GPS filter in home ---
             new_lat = data.get('lat', 16.0748)
             new_lon = data.get('lon', 108.1498)
@@ -1661,10 +1771,11 @@ class DroneApp(QMainWindow):
                 self.pfd.update()
 
         elif t == 'RADIO_STATUS':
-            self.pfd.rssi = data.get('rssi', 0)
-            
+            if getattr(self, 'rc_healthy', True):
+                self.pfd.rssi = data.get('rssi', 0)
+                
         elif t == 'RC_CHANNELS':
-            if 'rssi' in data:
+            if getattr(self, 'rc_healthy', True) and 'rssi' in data:
                 self.pfd.rssi = data['rssi']
                 
             if self.last_chans is not None and "chans" in data:
