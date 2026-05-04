@@ -482,27 +482,30 @@ class PFDWidget(QWidget):
         p.restore()
 
         # Status
-        p.save(); p.setPen(QPen(QColor(46, 204, 113) if self.is_armed else QColor(231, 76, 60))); p.setFont(QFont("Arial", 32, QFont.Weight.Bold))
-        p.drawText(QRectF(0, cy - 80, w, 60), Qt.AlignmentFlag.AlignCenter, "ARMED" if self.is_armed else "DISARMED")
-        p.setPen(Qt.GlobalColor.white); p.setFont(QFont("Arial", 11, QFont.Weight.Bold)); p.drawText(QRectF(0, cy + 35, w, 30), Qt.AlignmentFlag.AlignCenter, self.status_msg)
-        p.restore()
-
         p.save()
         p.setBrush(QColor(0, 0, 0, 220))
         hud_h = 35
         p.drawRect(0, h - hud_h, w, hud_h)
-        p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        p.setPen(Qt.GlobalColor.white)
-        
+
         fix_dict = {0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK Flt", 6: "RTK Fix"}
         fix_str = fix_dict.get(self.gps_fix_type, "Unk")
 
-        combined_str = f"Bat: {self.batt_v:.1f}V  {self.batt_a:.1f}A ({self.batt_p}%)  |  EKF: {self.ekf_status}  |  GPS1: {self.gps_sats} {fix_str} ({self.gps_hdop:.1f}) GPS2: {self.gps2_sats}({self.gps2_hdop:.1f})  |  RSSI: {self.rssi}%"
+        combined_str = f"Bat: {self.batt_v:.1f}V {self.batt_a:.1f}A ({self.batt_p}%) | EKF: {self.ekf_status} | GPS1: {self.gps_sats}({self.gps_hdop:.1f}) - {fix_str} GPS2: {self.gps2_sats}({self.gps2_hdop:.1f}) | RSSI: {self.rssi}%"
+
+        from PyQt6.QtGui import QFontMetrics
+        font_size = 10
+        font = QFont("Arial", font_size, QFont.Weight.Bold)
+        fm = QFontMetrics(font)
+
+        while fm.horizontalAdvance(combined_str) > (w - 10) and font_size > 6:
+            font_size -= 1
+            font.setPointSize(font_size)
+            fm = QFontMetrics(font)
+
+        p.setFont(font)
+        p.setPen(Qt.GlobalColor.white)
         p.drawText(QRectF(0, h - hud_h, w, hud_h), Qt.AlignmentFlag.AlignCenter, combined_str)
         p.restore()
-
-        p.setPen(QPen(Qt.GlobalColor.red, 3)); p.drawLine(int(cx-60), int(cy), int(cx-20), int(cy)); p.drawLine(int(cx+20), int(cy), int(cx+60), int(cy))
-        p.drawPolygon(QPolygonF([QPointF(cx, cy), QPointF(cx-8, cy+8), QPointF(cx+8, cy+8)]))
 
 class drone3DWidget(QWidget):
     def __init__(self, mav_worker=None, log_callback=None):
@@ -982,6 +985,10 @@ class DroneApp(QMainWindow):
         self.btn_rtl = QPushButton("RTL"); self.btn_rtl.setStyleSheet("background: #f39c12; font-weight: bold; color: white; padding: 5px;")
         self.btn_loiter = QPushButton("LOITER"); self.btn_loiter.setStyleSheet("background: #8e44ad; font-weight: bold; color: white; padding: 5px;")
         self.btn_loiter.clicked.connect(lambda: self.set_mode("LOITER"))
+
+        action_buttons = [self.btn_arm, self.btn_disarm, self.btn_takeoff, self.btn_loiter, self.btn_land, self.btn_rtl]
+        for btn in action_buttons:
+            btn.setFixedWidth(64)  
 
         self.btn_arm.clicked.connect(lambda: self.confirm_and_send_cmd(
             "ARM", "#c0392b", 
