@@ -83,7 +83,7 @@ class FlightReplayWidget(QWidget):
         self.map_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
         
         # link to local map file 
-        map_path = r"F:\PBL_DATN\Mavlink_app\map_data\map_mission.html"
+        map_path = r"F:\PBL_DATN\DUT_MCS_App\map_data\map_mission.html"
         
         # Load map
         self.map_view.load(QUrl.fromLocalFile(map_path))

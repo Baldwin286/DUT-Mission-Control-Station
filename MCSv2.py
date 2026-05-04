@@ -342,7 +342,7 @@ class DroneApp(QMainWindow):
 
         # HEADER
         header = QHBoxLayout(); logos = QHBoxLayout()
-        paths = [r"F:\PBL_DATN\Mavlink_app\pictures\VN_flag.jpg", r"F:\PBL_DATN\Mavlink_app\pictures\image002.jpg"]
+        paths = [r"F:\PBL_DATN\DUT_MCS_App\pictures\VN_flag.jpg", r"F:\PBL_DATN\DUT_MCS_App\pictures\image002.jpg"]
         for p in paths:
             lbl = QLabel()
             if os.path.exists(p): lbl.setPixmap(QPixmap(p).scaled(60, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -690,11 +690,11 @@ if __name__ == "__main__":
     from PyQt6.QtGui import QIcon, QPixmap
     from PyQt6.QtWidgets import QSplashScreen
     
-    app_icon = QIcon(r"F:\PBL_DATN\Mavlink_app\pictures\logo.png") 
+    app_icon = QIcon(r"F:\PBL_DATN\DUT_MCS_App\pictures\logo.png") 
     app.setWindowIcon(app_icon)
 
     # --- 2. SPLASH SCREEN ---
-    splash_pix = QPixmap(r"F:\PBL_DATN\Mavlink_app\pictures\logo.png") 
+    splash_pix = QPixmap(r"F:\PBL_DATN\DUT_MCS_App\pictures\logo.png") 
     splash_pix = splash_pix.scaled(900, 900, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
     
     splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)

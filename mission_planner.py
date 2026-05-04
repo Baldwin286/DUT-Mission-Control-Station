@@ -193,7 +193,7 @@ class MissionPlannerApp(QWidget):
 
     def load_map(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        map_path = os.path.join(base_dir, "F:\PBL_DATN\Mavlink_app\map_data\map_mission.html")
+        map_path = os.path.join(base_dir, "F:\PBL_DATN\DUT_MCS_App\map_data\map_mission.html")
         self.map_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         try:
             with open(map_path, "r", encoding="utf-8") as f:

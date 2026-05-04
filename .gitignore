@@ -1,0 +1,6 @@
+build/
+dist/
+DUT_MCS.spec
+__pycache__/
+Telemetry_Logs/
+video_records/
