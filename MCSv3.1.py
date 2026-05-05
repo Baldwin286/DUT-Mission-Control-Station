@@ -81,82 +81,42 @@ class VideoThread(QThread):
             self.video_writer = None
 
     def run(self):
-        video_url = f"udp://@0.0.0.0:{self.port}?overrun_nonfatal=1&fifo_size=50000000&timeout=2000000"
-        print("\n[AI STREAM] Waiting for connection from Camera...")
+        video_url = f"udp://@0.0.0.0:{self.port}?overrun_nonfatal=1&fifo_size=50000000"
+        print(f"\n[AI STREAM] Waiting for H264 streaming from Pi at: {video_url}")
 
-        # LOOP: Always waiting for videos
         while self.running:
             cap = cv2.VideoCapture(video_url, cv2.CAP_FFMPEG)
             
-            # NIf there is no video (camera is off), wait 1 second and try again
             if not cap.isOpened():
                 self.msleep(1000)
                 continue
 
             self.capture_active = True
-            print("\n[AI STREAM] The video stream has been captured!")
-            
-            # Buffer cleanup stream
-            def clear_buffer():
-                while self.running and self.capture_active:
-                    try:
-                        ret, frame = cap.read()
-                        if ret:
-                            with self.frame_lock:
-                                self.latest_frame = frame 
-                        else:
-                            time.sleep(0.01)
-                    except cv2.error as e:
-                        time.sleep(0.05) 
-                        continue
-                    except Exception as e:
-                        time.sleep(0.05)
-                        continue
+            print("\n[AI STREAM] Video stream captured! Uploading to UI...")
 
-            reader_thread = threading.Thread(target=clear_buffer, daemon=True)
-            reader_thread.start()
-
-            empty_frames = 0
-            
-            # Main image processing flow
             while self.running and self.capture_active:
-                with self.frame_lock:
-                    frame_to_process = self.latest_frame
-                    self.latest_frame = None 
+                ret, frame_to_process = cap.read()
+                
+                if not ret:
+                    self.msleep(5)
+                    continue
 
-                if frame_to_process is not None:
-                    empty_frames = 0 
-                    
-                    # 1. PUSH THE FRAME THROUGH THE MODULE FOR PROCESSING (RGB / GRAY / AI)
-                    if self.processor is not None:
-                        final_frame = self.processor.process(frame_to_process)
-                    else:
-                        final_frame = frame_to_process.copy()
-
-                    # 2. RECORD VIDEO TO FILE
-                    if self.is_recording:
-                        if self.video_writer is None:
-                            h, w, _ = final_frame.shape
-                            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                            self.video_writer = cv2.VideoWriter(self.record_filename, fourcc, 15.0, (w, h))
-                        self.video_writer.write(final_frame)
-
-                    # 3. SUBMIT TO MCS UI
-                    self.change_pixmap_signal.emit(final_frame)
+                if self.processor is not None:
+                    final_frame = self.processor.process(frame_to_process)
                 else:
-                    empty_frames += 1
-                    self.msleep(50) 
-                    
-                    # IF PRESS THE CAMERA OFF BUT IT TAKES MORE THAN 2 SECONDS -> DISCONNECT, COME BACK AND WAIT
-                    if empty_frames > 40:
-                        print("[AI STREAM] The camera is off. Waiting for a new stream...")
-                        self.capture_active = False 
-                        break 
+                    final_frame = frame_to_process.copy()
 
-            # Perform a cleanup before accepting a new stream
+                if self.is_recording:
+                    if self.video_writer is None:
+                        h, w, _ = final_frame.shape
+                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                        self.video_writer = cv2.VideoWriter(self.record_filename, fourcc, 15.0, (w, h))
+                    self.video_writer.write(final_frame)
+
+                self.change_pixmap_signal.emit(final_frame)
+
             self.stop_recording()
             cap.release()
-            reader_thread.join(timeout=1.0)
 
     def stop(self):
         self.running = False
