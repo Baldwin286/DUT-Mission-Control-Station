@@ -187,6 +187,7 @@ class MavlinkWorker(QThread):
                 #         raise Exception("No heartbeat received (Timeout)")
                 if self.connection is None:
                     self.connection = mavutil.mavlink_connection(self.conn_string, baud=self.baudrate)
+                    self.connection.source_system = 100
                     start_wait = time.time()
                     heartbeat_found = False
                     while time.time() - start_wait < 5.0:
@@ -1704,6 +1705,8 @@ class DroneApp(QMainWindow):
                  
         elif t == 'STATUSTEXT':
             status_msg = data.get('status_msg', '')
+            if "unknown message (44)" in status_msg:
+                return
             self.append_log(f"-> {status_msg}")
             self.pfd.status_msg = status_msg
             self.pfd.update() 
