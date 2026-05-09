@@ -182,29 +182,37 @@ class MissionPlannerApp(QWidget):
         self.btn_abort.setStyleSheet(btn_style + "background: #c0392b;") 
 
         layout.addWidget(left_panel)
-        self.map_view = QWebEngineView(); self.map_page = MissionWebPage(); self.map_page.waypoint_clicked.connect(self.add_wp)
+        self.map_view = QWebEngineView()
+        self.map_page = MissionWebPage()
+        
+        self.map_page.waypoint_clicked.connect(self.add_wp)
         self.map_page.fence_clicked.connect(self.add_fence_point)
         self.map_page.fly_here_clicked.connect(self.action_fly_here) 
-        
-        # --- 5. Polygon handler ---
         self.map_page.polygon_clicked.connect(self.handle_polygon_received)
+        # ----------------------------------------
+        self.map_view.setPage(self.map_page)
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         
-        self.map_view.setPage(self.map_page); layout.addWidget(self.map_view)
-
+        layout.addWidget(self.map_view)
+        layout.addWidget(self.map_view)
     def load_map(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         map_path = os.path.join(base_dir, "F:\PBL_DATN\DUT_MCS_App\map_data\map_mission.html")
-        self.map_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-        try:
-            with open(map_path, "r", encoding="utf-8") as f:
-                html = f.read()
-        except Exception as e:
-            html = f"<h1>Error loading map: {e}</h1>"
-            self.log(f"<b style='color:red;'>Error loading map_mission.html: {e}</b>")
-
+        #self.map_view.page().profile().setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        # try:
+        #     with open(map_path, "r", encoding="utf-8") as f:
+        #         html = f.read()
+        # except Exception as e:
+        #     html = f"<h1>Error loading map: {e}</h1>"
+        #     self.log(f"<b style='color:red;'>Error loading map_mission.html: {e}</b>")
         profile = QWebEngineProfile.defaultProfile()
         profile.setHttpUserAgent("Mozilla/5.0 Chrome/115.0 Safari/537.36")
-        self.map_view.setHtml(html)
+        from PyQt6.QtCore import QUrl
+        self.map_view.load(QUrl.fromLocalFile(map_path))
+        #self.map_view.setHtml(html)
 
     def add_wp(self, lat, lon, alt=None):
         if alt is None: alt = self.spin_alt.value()

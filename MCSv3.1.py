@@ -9,7 +9,7 @@ import socket
 import csv
 import json
 import shutil
-
+import requests
 # --- GPU and FFMPEG OPTIMIZED ---
 os.environ["QSG_RHI_BACKEND"] = "opengl"
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu-compositing --ignore-gpu-blocklist --log-level=3"
@@ -27,7 +27,8 @@ from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineS
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
-
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from pymavlink import mavutil
 
 # --- EMBEDD FLY PROGRAMMING FILE ---
@@ -47,6 +48,80 @@ def load_config(config_file="config.json"):
         print(f"[WARNING] Not found {config_file}")
         return {}
 CONFIG = load_config()
+
+# --- CLASS MAP AUTO-CACHE SERVER ---
+class TileProxyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map_data", "tiles")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        parts = self.path.strip("/").split("/")
+        if len(parts) != 3:
+            self.send_error(404, "Not Found")
+            return
+
+        z, x, y_ext = parts
+        
+        local_dir = os.path.join(cache_dir, z, x)
+        os.makedirs(local_dir, exist_ok=True)
+        local_file = os.path.join(local_dir, y_ext)
+
+        if os.path.exists(local_file):
+            with open(local_file, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-type", "image/png")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (ConnectionAbortedError, BrokenPipeError):
+                pass
+            return
+
+        # url = f"https://tile.openstreetmap.org/{z}/{x}/{y_ext}"
+        # headers = {'User-Agent': 'DUT_MCS_Map_Proxy/1.0'}
+        y_num = y_ext.split('.')[0]
+        url = f"http://mt1.google.com/vt/lyrs=y&x={x}&y={y_num}&z={z}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
+        try:
+            resp = requests.get(url, headers=headers, timeout=2)
+            if resp.status_code == 200:
+                with open(local_file, "wb") as f:
+                    f.write(resp.content)
+                self.send_response(200)
+                self.send_header("Content-type", "image/png")
+                self.end_headers()
+                try:
+                    self.wfile.write(resp.content) 
+                except (ConnectionAbortedError, BrokenPipeError):
+                    pass
+                return
+            else:
+                self.send_error(404, "Not Found")
+        except Exception as e:
+            self.send_error(404, "Offline and not cached")
+
+    def log_message(self, format, *args):
+        pass
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
+
+class MapCacheServerThread(QThread):
+    def __init__(self, port=8080):
+        super().__init__()
+        self.port = port
+        self.server = ThreadedHTTPServer(("127.0.0.1", self.port), TileProxyHandler)
+
+    def run(self):
+        print(f"[MAP SERVER] Run Map Auto-Cache at localhost:{self.port}...")
+        self.server.serve_forever()
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.wait()
+
 # ====================================================================================
 # --- CLASS RECEIVES GSTREAMER/FFMPEG VIDEOS ---
 class VideoThread(QThread):
@@ -722,6 +797,9 @@ class DroneApp(QMainWindow):
         self.param_groups = {}    
         self.param_tree_items = {}
         
+
+        self.map_server_thread = MapCacheServerThread(port=8080)
+        self.map_server_thread.start()
         self.init_ui()
         self.port_timer = QTimer(self); self.port_timer.timeout.connect(self.refresh_ports); self.port_timer.start(1000)
 
@@ -907,7 +985,7 @@ class DroneApp(QMainWindow):
         
         top_row.addStretch()
         
-        self.combo_type = QComboBox(); self.combo_type.addItems(["SITL (UDP 14550)", "SITL (TCP 5762)", "UDP (Pi)", "SERIAL", "WIFI Local (ESP8266)"])
+        self.combo_type = QComboBox(); self.combo_type.addItems(["SITL (UDP 14550)", "SITL (TCP 5762)", "UDP (Pi)", "SERIAL", "WIFI Local (Raspi_MCS)"])
         self.combo_port = QComboBox(); self.combo_port.setMinimumWidth(150); self.refresh_ports()
         self.combo_baud = QComboBox(); self.combo_baud.addItems(["115200", "57600", "38400", "9600"])
         self.btn_connect = QPushButton("CONNECT")
@@ -991,10 +1069,24 @@ class DroneApp(QMainWindow):
         miss_lay.addWidget(self.lbl_wp); miss_lay.addWidget(self.lbl_time)
         top_dash.addWidget(miss_group)
 
+        # self.btn_record_telemetry = QPushButton("START TELEMETRY LOG")
+        # self.btn_record_telemetry.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 15px; border-radius: 5px;")
+        # self.btn_record_telemetry.clicked.connect(self.toggle_record)
+        # top_dash.addWidget(self.btn_record_telemetry)
+#         log_group = QGroupBox("DATA LOGGING")
+#         log_group.setStyleSheet("QGroupBox { font-weight: bold; color: #95a5a6; border: 1px solid #333; border-radius: 5px; margin-top: 12px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
+#         log_lay = QHBoxLayout(log_group)
+
+#         self.btn_record_telemetry = QPushButton("START TELEMETRY LOG")
+#         self.btn_record_telemetry.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 5px; border-radius: 5px;")
+#         self.btn_record_telemetry.clicked.connect(self.toggle_record)
+
+#         log_lay.addWidget(self.btn_record_telemetry)
+#         top_dash.addWidget(log_group)
         self.btn_record_telemetry = QPushButton("START TELEMETRY LOG")
-        self.btn_record_telemetry.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 15px; border-radius: 5px;")
+        self.btn_record_telemetry.setStyleSheet("background: #2c3e50; font-weight: bold; color: white; padding: 15px; border-radius: 5px; margin-top: 15px;")
         self.btn_record_telemetry.clicked.connect(self.toggle_record)
-        top_dash.addWidget(self.btn_record_telemetry)
+        top_dash.addWidget(self.btn_record_telemetry, alignment=Qt.AlignmentFlag.AlignBottom)
 
         flight_layout.addLayout(top_dash)
 
@@ -1014,7 +1106,7 @@ class DroneApp(QMainWindow):
         grid.addLayout(v1,0,0); grid.addLayout(v2,0,1); grid.addLayout(v3,1,0); grid.addLayout(v4,1,1); grid.addLayout(v5,2,0); grid.addLayout(v6,2,1)
         left_col.addWidget(self.pfd, 4); left_col.addWidget(df, 1)
         right_col = QVBoxLayout(); lg = QGroupBox("SYSTEM LOG MESSAGES"); lg.setStyleSheet("color: #888; font-weight: bold; background: #1a1a1a;"); ll = QVBoxLayout(lg)
-        self.txt_log = QTextEdit(); self.txt_log.setReadOnly(True); self.txt_log.setStyleSheet("background: black; color: #2ecc71; font-family: 'Consolas'; font-size: 11px; border: none;"); ll.addWidget(self.txt_log); lg.setMaximumHeight(150)
+        self.txt_log = QTextEdit(); self.txt_log.setReadOnly(True); self.txt_log.document().setMaximumBlockCount(200); self.txt_log.setStyleSheet("background: black; color: #2ecc71; font-family: 'Consolas'; font-size: 11px; border: none;"); ll.addWidget(self.txt_log); lg.setMaximumHeight(150)
         
         self.map_view = QWebEngineView(); self.map_view.setStyleSheet("border-radius: 10px; border: 2px solid #333;")
         self.flight_map_page = FlightWebPage()
@@ -1028,6 +1120,7 @@ class DroneApp(QMainWindow):
         profile.setHttpUserAgent(user_agent)
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         # --- READ HTML MAP FILES ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
         map_path = CONFIG.get("paths", {}).get("map_mcs", os.path.join(base_dir, "map_data", "map_MCS.html")) 
@@ -1039,7 +1132,8 @@ class DroneApp(QMainWindow):
             map_html = f"<h1>Map file not found error: {e}</h1>"
             self.append_log(f"<b style='color:red;'>Lỗi tải map: {e}</b>")
             
-        self.map_view.setHtml(map_html)
+        # self.map_view.setHtml(map_html)
+        self.map_view.load(QUrl.fromLocalFile(map_path))
         # ----------------------------------------
         
         right_col.addWidget(lg); right_col.addWidget(self.map_view); body.addLayout(left_col, 1); body.addLayout(right_col, 2); flight_layout.addLayout(body, 5)
@@ -1571,8 +1665,8 @@ class DroneApp(QMainWindow):
                 conn = 'tcp:127.0.0.1:5762'   
             elif "UDP (Pi)" in combo_val: 
                 conn = 'udp:0.0.0.0:14552'    
-            elif "WIFI" in combo_val or "ESP8266" in combo_val: 
-                conn = 'udp:0.0.0.0:14550' 
+            elif "WIFI" in combo_val or "Raspi_MCS" in combo_val: 
+                conn = 'udpin:0.0.0.0:14550' 
             else:
                 full = self.combo_port.currentText()
                 if not full: self.append_log("Select COM port!"); return
@@ -1601,7 +1695,20 @@ class DroneApp(QMainWindow):
             if hasattr(self, 'tts_worker'):
                 self.tts_worker.speak("Connecting system")
 
+    # def update_map(self):
+    #     lat, lon = self.drone_pos
+    #     self.map_view.page().runJavaScript(f"updateDronePos({lat}, {lon}, {self.drone_heading}, {self.drone_course});")
     def update_map(self):
+        import time
+        if not hasattr(self, 'last_map_update'):
+            self.last_map_update = 0
+            
+        current_time = time.time()
+        if current_time - self.last_map_update < 0.5: 
+            return
+            
+        self.last_map_update = current_time
+
         lat, lon = self.drone_pos
         self.map_view.page().runJavaScript(f"updateDronePos({lat}, {lon}, {self.drone_heading}, {self.drone_course});")
 
@@ -1665,6 +1772,19 @@ class DroneApp(QMainWindow):
             self.pfd.roll, self.pfd.pitch = data.get("r", 0), data.get("p", 0)
             self.val_yaw.setText(f"{data.get('y', 0):.2f}")
             self.pfd.update()
+            import time
+            if not hasattr(self, 'last_att_update'): 
+                self.last_att_update = 0
+                
+            if time.time() - self.last_att_update > 0.05: # Vẽ tối đa 20 lần/giây
+                if hasattr(self, 'imu_graph'):
+                    self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+                if hasattr(self, 'drone_3d'):
+                    self.drone_3d.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+                if hasattr(self, 'page_setup'):
+                    self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+                self.last_att_update = time.time()
+
             if hasattr(self, 'imu_graph'):
                 self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
 
@@ -1855,6 +1975,8 @@ class DroneApp(QMainWindow):
             self.mav_worker.stop()
         if hasattr(self, 'pl_thread') and self.pl_thread:
             self.pl_thread.stop()
+        if hasattr(self, 'map_server_thread'):
+            self.map_server_thread.stop()
         event.accept()
     
     def confirm_and_send_cmd(self, action_name, color, cmd_func):

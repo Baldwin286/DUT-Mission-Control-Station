@@ -1,8 +1,10 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script> -->
+    <link rel="stylesheet" href="./leaflet.css" />
+    <script src="./leaflet.js"></script>
     <style>
         body,html,#map{margin:0;height:100%;background:#121212;} 
         .legend { line-height: 18px; color: white; }
@@ -18,12 +20,16 @@
         //     maxZoom: 20,
         //     attribution: '© Google Earth'
         // }).addTo(map);
-        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            maxNativeZoom: 19,
-            maxZoom: 24,
-            attribution: '© Esri & Earthstar Geographics'
+        // L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        //     maxNativeZoom: 19,
+        //     maxZoom: 24,
+        //     attribution: '© Esri & Earthstar Geographics'
+        // }).addTo(map);
+        L.tileLayer('http://localhost:8080/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                minZoom: 2,
+                attribution: 'DUT MCS Offline/Online Map'
         }).addTo(map);
-
         window.isDragging = false;
         var dragTimer;
         
