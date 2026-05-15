@@ -14,13 +14,13 @@ import requests
 os.environ["QSG_RHI_BACKEND"] = "opengl"
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu-compositing --ignore-gpu-blocklist --log-level=3"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|er;1"
-
+os.environ["MAVLINK20"] = "1"
 import serial.tools.list_ports
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QFrame, QPushButton, QComboBox, 
                              QGridLayout, QTextEdit, QGroupBox, QStackedWidget,
                              QMessageBox, QDoubleSpinBox, QSizePolicy, 
-                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog, QDialog, QSplitter, QTabWidget)
+                             QLineEdit, QTreeWidget, QTreeWidgetItem, QHeaderView, QFileDialog, QDialog, QSplitter, QTabWidget,QProgressBar)
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygonF, QFont, QImage, QTextCursor, QVector3D, QBrush
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QPointF, QRectF, QDateTime, QTimer, QUrl, QRect
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
@@ -38,7 +38,7 @@ from mission_planner import MissionPlannerApp
 from module_function.voice_alert import TTSWorker
 from module_function.vibration_graph import IMUGraphWidget
 from module_function.flight_data_replay import FlightReplayWidget
-
+from module_function.log_reviewer import LogReviewWidget
 # ====================================================================================
 def load_config(config_file="config.json"):
     if os.path.exists(config_file):
@@ -118,9 +118,14 @@ class MapCacheServerThread(QThread):
         self.server.serve_forever()
 
     def stop(self):
-        self.server.shutdown()
+        # self.server.shutdown()
+        # self.server.server_close()
+        # self.wait()
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
         self.server.server_close()
-        self.wait()
+        if not self.wait(1000):
+            self.terminate()
+            self.wait(100)
 
 # ====================================================================================
 # --- CLASS RECEIVES GSTREAMER/FFMPEG VIDEOS ---
@@ -195,8 +200,10 @@ class VideoThread(QThread):
 
     def stop(self):
         self.running = False
-        self.terminate() 
-        self.wait()
+        self.capture_active = False
+        if not self.wait(1000):
+            self.terminate()
+            self.wait(100)
 # ====================================================================================
 # --- GET ACCURATE ESTIMATED PI STOPPING LOCATION ---
 class PLReceiverThread(QThread):
@@ -247,7 +254,9 @@ class MavlinkWorker(QThread):
         if self.connection:
             try: self.connection.close()
             except: pass
-        self.wait()
+        if not self.wait(1000):
+            self.terminate()
+            self.wait(100)
 
     def run(self):
         import socket
@@ -380,7 +389,7 @@ class MavlinkWorker(QThread):
                     if t == 'ATTITUDE':
                         d.update({"r": math.degrees(msg.roll), "p": math.degrees(msg.pitch), "y": math.degrees(msg.yaw)})
                     elif t == 'VFR_HUD':
-                        d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading})
+                        d.update({"alt": msg.alt, "gs": msg.groundspeed, "vs": msg.climb, "hdg": msg.heading, "throttle": msg.throttle})
                     elif t == 'SYS_STATUS' and src_comp == 1:
                         ekf_ok = bool(msg.onboard_control_sensors_health & (1 << 11))
                         rc_ok = bool(msg.onboard_control_sensors_health & mavutil.mavlink.MAV_SYS_STATUS_SENSOR_RC_RECEIVER)
@@ -415,14 +424,26 @@ class MavlinkWorker(QThread):
                         else:
                             d.update({"status_msg": status_msg})
                     elif t == 'RC_CHANNELS':
-                        chans = [msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw, msg.chan9_raw, msg.chan10_raw, msg.chan11_raw, msg.chan12_raw]
+                        chans = [
+                            msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw,
+                            msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw,
+                            msg.chan9_raw, msg.chan10_raw, msg.chan11_raw, msg.chan12_raw,
+                            msg.chan13_raw, msg.chan14_raw, msg.chan15_raw, msg.chan16_raw
+                        ]
                         rc_rssi = msg.rssi
                         rssi_percent = 0
                         if rc_rssi != 255 and rc_rssi > 0:
                             rssi_percent = int((rc_rssi / 254.0) * 100)
                         d.update({"chans": chans, "rssi": rssi_percent })
                     elif t == 'NAV_CONTROLLER_OUTPUT':
-                        d.update({"wp_dist": msg.wp_dist})
+                        d.update({
+                            "wp_dist": msg.wp_dist,
+                            "nav_roll": msg.nav_roll,
+                            "nav_pitch": msg.nav_pitch,
+                            "nav_bearing": msg.nav_bearing,
+                            "alt_error": msg.alt_error,
+                            "xtrack_error": msg.xtrack_error
+                        })
                     elif t == 'MISSION_CURRENT':
                         d.update({"seq": msg.seq})
                     elif t in ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK', 'MISSION_COUNT', 'MISSION_ITEM_INT']:
@@ -567,7 +588,7 @@ class drone3DWidget(QWidget):
 
         from PyQt6.QtGui import QVector3D
         self.view = gl.GLViewWidget()
-        self.view.setCameraPosition(distance=15, elevation=30, azimuth=45)
+        self.view.setCameraPosition(distance=25, elevation=30, azimuth=45)
         self.view.setBackgroundColor('#121212')
         layout.addWidget(self.view, 1)
 
@@ -578,50 +599,67 @@ class drone3DWidget(QWidget):
 
         arm_len = 3.0
         
-        body_box = gl.GLBoxItem(size=QVector3D(1, 1, 0.5), color=(0.2, 0.2, 0.2, 1.0))
-        body_box.init_offset = (-0.5, -0.5, -0.25) 
+        body_box = gl.GLBoxItem(size=QVector3D(1.5, 1.5, 0.5), color=(0.2, 0.2, 0.2, 1.0))
+        body_box.init_offset = (-0.75, -0.75, -0.25) 
         self.view.addItem(body_box)
 
+        nose_box = gl.GLBoxItem(size=QVector3D(0.8, 0.8, 0.4), color=(0.0, 1.0, 0.0, 1.0))
+        nose_box.init_offset = (0.75, -0.4, -0.2) 
+        self.view.addItem(nose_box)
+
+        arrow_pts = np.array([
+            [-1.0, 0, 0.6],    
+            [2.5, 0, 0.6],     
+            [1.5, 0.5, 0.6],   
+            [2.5, 0, 0.6],     
+            [1.5, -0.5, 0.6]   
+        ])
+        arrow_line = gl.GLLinePlotItem(pos=arrow_pts, color=(0.0, 1.0, 0.0, 1.0), width=5, antialias=True, mode='line_strip')
+        arrow_line.init_offset = (0.0, 0.0, 0.0)
+        self.view.addItem(arrow_line)
+
         pts = [
-            [arm_len, arm_len, 0.0], [-arm_len, -arm_len, 0.0],   
-            [-arm_len, arm_len, 0.0], [arm_len, -arm_len, 0.0]    
+            [arm_len, arm_len, 0.0],   
+            [arm_len, -arm_len, 0.0],  
+            [-arm_len, arm_len, 0.0],  
+            [-arm_len, -arm_len, 0.0]  
         ]
         
         self.arms = []
+        self.motors = []
+        self.props = []
+        
+        motor_mesh = gl.MeshData.cylinder(rows=1, cols=16, radius=[0.3, 0.3], length=0.8)
+        prop_mesh = gl.MeshData.cylinder(rows=1, cols=20, radius=[1.5, 1.5], length=0.05)
+
         for p in pts:
+            is_front = p[0] > 0
+            p_color = (1.0, 0.0, 0.0, 1.0) if is_front else (1.0, 1.0, 1.0, 1.0)
+            prop_color = (1.0, 0.0, 0.0, 0.6) if is_front else (1.0, 1.0, 1.0, 0.4)
+
             line_pts = np.array([[0,0,0], p])
-            p_color = (1.0, 1.0, 1.0, 1.0) if p[1] < 0 else (1.0, 0.0, 0.0, 1.0)
             arm = gl.GLLinePlotItem(pos=line_pts, color=p_color, width=15, antialias=True, mode='lines')
             arm.init_offset = (0.0, 0.0, 0.0)
             self.arms.append(arm)
             self.view.addItem(arm)
-        
-        self.motors = []
-        self.props = []
-        
-        motor_mesh = gl.MeshData.cylinder(rows=1, cols=16, radius=[0.2, 0.2], length=0.6)
-        prop_mesh = gl.MeshData.cylinder(rows=1, cols=20, radius=[0.8, 0.8], length=0.01)
 
-        for p in pts:
             motor = gl.GLMeshItem(meshdata=motor_mesh, color=(0.4, 0.4, 0.4, 1.0), smooth=True)
-            motor.init_offset = (float(p[0]), float(p[1]), -0.3)
+            motor.init_offset = (float(p[0]), float(p[1]), -0.4)
             self.motors.append(motor)
             self.view.addItem(motor)
 
-            p_color = (1.0, 1.0, 1.0, 0.7) if p[1] < 0 else (1.0, 0.0, 0.0, 0.7)
-            prop = gl.GLMeshItem(meshdata=prop_mesh, color=p_color, smooth=True)
-            prop.init_offset = (float(p[0]), float(p[1]), 0.3)
+            prop = gl.GLMeshItem(meshdata=prop_mesh, color=prop_color, smooth=True)
+            prop.init_offset = (float(p[0]), float(p[1]), 0.4)
             self.props.append(prop)
             self.view.addItem(prop)
 
-        self.drone_model = [body_box] + self.arms + self.motors + self.props
+        self.drone_model = [body_box, nose_box, arrow_line] + self.arms + self.motors + self.props
         
         self.update_attitude(0, 0, 0)
 
     def update_attitude(self, roll, pitch, yaw):
         for item in self.drone_model:
             item.resetTransform()
-            
             if hasattr(item, 'init_offset'):
                 dx, dy, dz = item.init_offset
                 item.translate(dx, dy, dz)
@@ -641,7 +679,6 @@ class drone3DWidget(QWidget):
             mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
             0, 0, 0, 0, 1, 0, 0  
         )
-        
         if self.log_callback: self.log_callback("<b style='color:#3498db;'>[3D] The Calibrate Level Acceleration command has been sent...</b>")
 
 class FlightWebPage(QWebEnginePage):
@@ -755,6 +792,570 @@ class SlideConfirmDialog(QDialog):
         
         layout.addWidget(self.slider, alignment=Qt.AlignmentFlag.AlignCenter)
 
+class QCMaintenanceWidget(QWidget):
+    def __init__(self, main_app=None):
+        super().__init__()
+        self.main_app = main_app  
+        self.mav_worker = None
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("PRE-FLIGHT CHECKLIST")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #f39c12;")
+        layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.dash_layout = QGridLayout()
+        self.dash_layout.setSpacing(10)
+        
+        def create_indicator(label_text):
+            grp = QGroupBox(label_text)
+            grp.setStyleSheet("""
+                QGroupBox { 
+                    font-weight: bold; color: #bdc3c7; 
+                    border: 1px solid #555; border-radius: 5px; 
+                    margin-top: 15px; 
+                }
+                QGroupBox::title { 
+                    subcontrol-origin: margin; 
+                    subcontrol-position: top left; 
+                    left: 10px; 
+                    top: 0px; 
+                    padding: 0 5px; 
+                    background-color: #121212; 
+                }
+            """)
+            l = QVBoxLayout(grp)
+            l.setContentsMargins(5, 10, 5, 5) 
+            
+            val = QLabel("WAITING")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet("font-size: 13px; font-weight: bold; color: #7f8c8d;")
+            
+            status = QLabel("N/A")
+            status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            status.setStyleSheet("font-size: 11px; font-weight: bold; color: #fff; background: #34495e; padding: 3px; border-radius: 3px;")
+            
+            l.addWidget(val)
+            l.addWidget(status)
+            return grp, val, status
+
+        self.grp_ekf, self.val_ekf, self.st_ekf = create_indicator("EKF STATUS")
+        self.grp_imu, self.val_imu, self.st_imu = create_indicator("IMU SENSOR")
+        self.grp_pwr, self.val_pwr, self.st_pwr = create_indicator("POWER (VOLTAGE)")
+        self.grp_baro, self.val_baro, self.st_baro = create_indicator("BAROMETER")
+        self.grp_gps1, self.val_gps1, self.st_gps1 = create_indicator("GPS 1 (SATS)")
+        self.grp_gps2, self.val_gps2, self.st_gps2 = create_indicator("GPS 2 (SATS)")
+        
+        self.grp_comp, self.val_comp, self.st_comp = create_indicator("COMPASS (MAG)")
+        self.grp_mot, self.val_mot, self.st_mot = create_indicator("MOTOR SEQUENCE")
+        
+        self.dash_layout.addWidget(self.grp_ekf, 0, 0)
+        self.dash_layout.addWidget(self.grp_imu, 0, 1)
+        self.dash_layout.addWidget(self.grp_pwr, 0, 2)
+        self.dash_layout.addWidget(self.grp_baro, 0, 3)
+        self.dash_layout.addWidget(self.grp_gps1, 1, 0)
+        self.dash_layout.addWidget(self.grp_gps2, 1, 1)
+        self.dash_layout.addWidget(self.grp_comp, 1, 2)
+        self.dash_layout.addWidget(self.grp_mot, 1, 3)  
+        
+        layout.addLayout(self.dash_layout, 2)
+
+        man_group = QGroupBox("MANUAL INDIVIDUAL MOTOR TEST")
+        man_group.setStyleSheet("""
+            QGroupBox { 
+                font-weight: bold; color: #3498db; 
+                border: 1px solid #333; border-radius: 5px; 
+                margin-top: 15px; 
+            } 
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                left: 10px; 
+                top: 0px; 
+                padding: 0 5px; 
+                background: #121212;
+            }
+        """)
+        man_lay = QHBoxLayout(man_group)
+        
+        man_lay.addWidget(QLabel("Throttle (%):", styleSheet="color: #ecf0f1; font-weight: bold;"))
+        self.spin_throttle = QDoubleSpinBox()
+        self.spin_throttle.setRange(1, 100)
+        self.spin_throttle.setValue(5.0) 
+        self.spin_throttle.setSuffix(" %")
+        self.spin_throttle.setSingleStep(1.0)
+        self.spin_throttle.setStyleSheet("""
+            QDoubleSpinBox {
+                background: #2c3e50; 
+                color: white; 
+                border: 1px solid #34495e; 
+                border-radius: 3px; 
+                padding: 0px 15px 0px 5px;
+                min-height: 25px;
+            }
+        """)
+        man_lay.addWidget(self.spin_throttle)
+        
+        btn_style = "background: #e67e22; color: white; font-weight: bold; padding: 8px 15px; border-radius: 3px;"
+        self.btn_m1 = QPushButton("TEST M1")
+        self.btn_m2 = QPushButton("TEST M2")
+        self.btn_m3 = QPushButton("TEST M3")
+        self.btn_m4 = QPushButton("TEST M4")
+        self.btn_mall = QPushButton("TEST ALL") 
+        self.btn_stop_motor = QPushButton("STOP MOTOR")
+        
+        self.btn_mall.setStyleSheet("background: #8e44ad; color: white; font-weight: bold; padding: 8px 15px; border-radius: 3px;")
+        self.btn_stop_motor.setStyleSheet("background: #c0392b; color: white; font-weight: bold; padding: 8px 15px; border-radius: 3px;")
+        
+        for btn in [self.btn_m1, self.btn_m2, self.btn_m3, self.btn_m4]:
+            btn.setStyleSheet(btn_style)
+            man_lay.addWidget(btn)
+        
+        man_lay.addWidget(self.btn_mall)
+        man_lay.addWidget(self.btn_stop_motor)
+            
+        self.btn_m1.clicked.connect(lambda: self.run_manual_motor_test(1))
+        self.btn_m2.clicked.connect(lambda: self.run_manual_motor_test(2))
+        self.btn_m3.clicked.connect(lambda: self.run_manual_motor_test(3))
+        self.btn_m4.clicked.connect(lambda: self.run_manual_motor_test(4))
+        self.btn_mall.clicked.connect(self.run_manual_motor_test_all)
+        self.btn_stop_motor.clicked.connect(self.stop_all_motors)
+        
+        layout.addWidget(man_group)
+
+        self.qc_log = QTextEdit()
+        self.qc_log.setReadOnly(True)
+        self.qc_log.setStyleSheet("background: #1e1e1e; color: #2ecc71; font-family: 'Consolas'; font-size: 12px; border: 1px solid #333; border-radius: 5px;")
+        layout.addWidget(self.qc_log, 3)
+
+        btn_lay = QHBoxLayout()
+        self.btn_start_qc = QPushButton("START CHECK")
+        self.btn_start_qc.setStyleSheet("background: #2980b9; font-weight: bold; color: white; padding: 12px; border-radius: 5px; font-size: 13px;")
+        self.btn_start_qc.clicked.connect(self.start_qc_check)
+        btn_lay.addWidget(self.btn_start_qc)
+        layout.addLayout(btn_lay)
+
+        self.reset_flags()
+        
+        self.mute_timer = QTimer(self)
+        self.mute_timer.setSingleShot(True)
+        self.mute_timer.timeout.connect(self.unmute_tts)
+
+        self.seq_timer = QTimer(self)
+        self.seq_timer.timeout.connect(self.process_next_motor)
+        self.current_seq_idx = 1
+        self.seq_thr_pct = 0
+
+    def reset_flags(self):
+        self.is_checking = False
+        self.ekf_ok = False
+        self.imu_active = False
+        self.power_volt = 0.0
+        self.baro_active = False
+        self.compass_active = False 
+        self.gps1_sats = 0
+        self.gps2_sats = 0
+        self.abort_sequence = False 
+
+    def log(self, msg, color="#2ecc71"):
+        ts = QDateTime.currentDateTime().toString("hh:mm:ss")
+        self.qc_log.append(f"<span style='color: #888;'>[{ts}]</span> <span style='color: {color};'>{msg}</span>")
+        self.qc_log.moveCursor(QTextCursor.MoveOperation.End)
+
+    def run_manual_motor_test(self, motor_num):
+        if not self.mav_worker or not self.mav_worker.connection:
+            QMessageBox.warning(self, "Warning", "Drone not connected!")
+            return
+            
+        thr_pct = self.spin_throttle.value()
+        self.log(f"MANUAL TEST: Motor {motor_num} at {thr_pct}% throttle...", "#e67e22")
+        
+        if self.main_app: self.main_app.is_qc_testing = True 
+        self.send_motor_command(motor_num, thr_pct)
+        # Khóa miệng 5 giây
+        self.mute_timer.start(5000)
+
+    def run_manual_motor_test_all(self):
+        if not self.mav_worker or not self.mav_worker.connection:
+            QMessageBox.warning(self, "Warning", "Drone not connected!")
+            return
+            
+        self.seq_thr_pct = self.spin_throttle.value()
+        self.log(f"TEST ALL: Spinning motors sequentially at {self.seq_thr_pct}%...", "#c0392b")
+        
+        if self.main_app: self.main_app.is_qc_testing = True 
+        
+        self.abort_sequence = False
+        
+        self.test_sequence = [1, 2, 3, 4] 
+        self.current_seq_idx = 0
+
+        self.mute_timer.start(15000)
+        
+        self.process_next_motor()
+        self.seq_timer.start(3000)
+
+    def process_next_motor(self):
+        """Hàng đợi thông minh tự động nhảy số motor"""
+        if getattr(self, 'abort_sequence', False) or self.current_seq_idx >= len(self.test_sequence):
+            self.seq_timer.stop()
+            if not getattr(self, 'abort_sequence', False):
+                self.log("TEST ALL SEQUENCE COMPLETED.", "#2ecc71")
+            return
+            
+        current_motor = self.test_sequence[self.current_seq_idx]
+        self.val_mot.setText(f"SPINNING M{current_motor}")
+        self.send_motor_command(current_motor, self.seq_thr_pct)
+        self.current_seq_idx += 1
+
+    def stop_all_motors(self):
+        if not self.mav_worker or not self.mav_worker.connection:
+            return
+            
+        self.log("EMERGENCY STOP: Halting all motors immediately!", "#e74c3c")
+        if self.main_app: self.main_app.is_qc_testing = True 
+        
+        self.abort_sequence = True
+        if hasattr(self, 'seq_timer'):
+            self.seq_timer.stop()
+            
+        active_motor = getattr(self, 'current_active_motor', None)
+        
+        if active_motor:
+            self.send_motor_command(active_motor, 0)
+            QTimer.singleShot(100, lambda: self.send_motor_command(active_motor, 0))
+            QTimer.singleShot(200, lambda: self.send_motor_command(active_motor, 0))
+        else:
+            for i in range(1, 5):
+                QTimer.singleShot(i * 100, lambda m=i: self.send_motor_command(m, 0))
+                
+        self.val_mot.setText("STOPPED")
+        self.mute_timer.start(5000)
+
+    def force_disarm(self):
+        """Lệnh đao phủ cắt mọi nguồn điện của motor"""
+        if self.mav_worker and self.mav_worker.connection:
+            self.mav_worker.connection.mav.command_long_send(
+                self.mav_worker.connection.target_system,
+                self.mav_worker.connection.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+                0, 21196, 0, 0, 0, 0, 0
+            )
+
+    def unmute_tts(self):
+        if self.main_app: self.main_app.is_qc_testing = False
+
+    def send_motor_command(self, motor_num, thr_pct):
+        if self.mav_worker and self.mav_worker.connection:
+            motor_map = {1: 1, 2: 3, 3: 4, 4: 2}
+            
+            if motor_num == 0:
+                ap_motor = 0 
+            else:
+                ap_motor = motor_map.get(motor_num, motor_num)
+            
+            if thr_pct > 0:
+                self.current_active_motor = motor_num
+            
+            def _send_cmd():
+                if self.mav_worker and self.mav_worker.connection:
+                    self.mav_worker.connection.mav.command_long_send(
+                        self.mav_worker.connection.target_system,
+                        self.mav_worker.connection.target_component,
+                        mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST, 0,
+                        ap_motor,  
+                        0,         
+                        thr_pct,   
+                        2,         
+                        1,         
+                        0, 
+                        0
+                    )
+            
+            _send_cmd()
+            QTimer.singleShot(50, _send_cmd)
+
+    def start_qc_check(self):
+        if getattr(self, 'is_checking', False): return
+        
+        if not self.mav_worker or not self.mav_worker.connection:
+            self.log("ERROR: Drone not connected! Cannot perform QC.", "#e74c3c")
+            QMessageBox.warning(self, "Warning", "Please connect to the drone first!")
+            return
+        
+        reply = QMessageBox.question(self, "SAFETY WARNING", 
+                                     "DANGER: Propellers MUST BE REMOVED before testing motors!\n\nAre propellers removed?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            self.log("QC aborted for safety. Please remove propellers.", "#e74c3c")
+            return
+
+        self.is_checking = True
+        self.abort_sequence = False
+        
+        if self.main_app: self.main_app.is_qc_testing = True
+        self.mute_timer.stop()
+        self.qc_log.clear()
+        self.log("INITIATING PRE-FLIGHT DIAGNOSTICS & MOTOR SEQUENCE...", "#f39c12")
+        
+        for st in [self.st_ekf, self.st_imu, self.st_pwr, self.st_baro, self.st_gps1, self.st_gps2, self.st_comp, self.st_mot]:
+            st.setStyleSheet("background: #f39c12; color: #fff; padding: 3px; border-radius: 3px;")
+            st.setText("TESTING...")
+        
+        self.btn_start_qc.setEnabled(False)
+        self.btn_start_qc.setStyleSheet("background: #7f8c8d; font-weight: bold; color: white; padding: 12px; border-radius: 5px;")
+        self.btn_start_qc.setText("DIAGNOSTICS IN PROGRESS...")
+        
+        thr_pct = self.spin_throttle.value()
+        
+        QTimer.singleShot(2000, lambda: self.auto_test_motor(1, thr_pct))
+        QTimer.singleShot(5000, lambda: self.auto_test_motor(2, thr_pct))
+        QTimer.singleShot(8000, lambda: self.auto_test_motor(3, thr_pct))
+        QTimer.singleShot(11000, lambda: self.auto_test_motor(4, thr_pct))
+        QTimer.singleShot(14000, self.end_qc_check)
+
+    def auto_test_motor(self, motor_num, thr_pct):
+        if getattr(self, 'abort_sequence', False): return 
+        self.log(f"Spinning Motor {motor_num} ({thr_pct}% Throttle for 2 seconds)...", "#3498db")
+        self.val_mot.setText(f"SPINNING M{motor_num}")
+        self.send_motor_command(motor_num, thr_pct)
+
+    def process_telemetry(self, data):
+        t = data.get('type')
+        if not t: return
+
+        if t == 'SYS_STATUS':
+            self.ekf_ok = data.get('ekf', False)
+            self.val_ekf.setText("HEALTHY" if self.ekf_ok else "BAD")
+            
+            v = data.get('v', 0)
+            if v > 0:
+                self.power_volt = v
+                self.val_pwr.setText(f"{v:.2f} V")
+
+        elif t in ['RAW_IMU', 'SCALED_IMU', 'ATTITUDE']:
+            self.imu_active = True
+            if not getattr(self, 'is_checking', False):
+                self.val_imu.setText("RECEIVING")
+
+        elif t == 'VFR_HUD' or t == 'GLOBAL_POSITION_INT':
+            self.baro_active = True
+            if t == 'VFR_HUD':
+                self.val_baro.setText(f"Alt: {data.get('alt', 0):.1f}m")
+                
+                self.compass_active = True
+                self.val_comp.setText(f"Hdg: {data.get('hdg', 0)}°")
+
+        elif t == 'GPS_RAW_INT':
+            self.gps1_sats = data.get('sats', 0)
+            self.val_gps1.setText(f"{self.gps1_sats} SATS")
+
+        elif t == 'GPS2_RAW':
+            self.gps2_sats = data.get('sats2', 0)
+            self.val_gps2.setText(f"{self.gps2_sats} SATS")
+
+    def end_qc_check(self):
+        if getattr(self, 'abort_sequence', False): 
+            self.is_checking = False
+            self.btn_start_qc.setEnabled(True)
+            self.btn_start_qc.setStyleSheet("background: #2980b9; font-weight: bold; color: white; padding: 12px; border-radius: 5px;")
+            self.btn_start_qc.setText("RE-RUN QC & MOTOR TEST")
+            return
+            
+        self.is_checking = False
+        self.mute_timer.start(3000)
+        
+        self.btn_start_qc.setEnabled(True)
+        self.btn_start_qc.setStyleSheet("background: #2980b9; font-weight: bold; color: white; padding: 12px; border-radius: 5px;")
+        self.btn_start_qc.setText("RE-RUN TEST")
+        self.log("DIAGNOSTICS COMPLETED", "#f39c12")
+        
+        def set_res(st_lbl, is_pass):
+            if is_pass:
+                st_lbl.setStyleSheet("background: #27ae60; color: #fff; padding: 3px; border-radius: 3px;")
+                st_lbl.setText("PASS")
+            else:
+                st_lbl.setStyleSheet("background: #e74c3c; color: #fff; padding: 3px; border-radius: 3px;")
+                st_lbl.setText("FAIL")
+
+        set_res(self.st_ekf, self.ekf_ok)
+        set_res(self.st_imu, self.imu_active)
+        set_res(self.st_pwr, self.power_volt > 10.0) 
+        set_res(self.st_baro, self.baro_active)
+        set_res(self.st_comp, self.compass_active) 
+        set_res(self.st_gps1, self.gps1_sats >= 6)   
+        
+        if self.gps2_sats > 0:
+            set_res(self.st_gps2, self.gps2_sats >= 6)
+        else:
+            self.st_gps2.setStyleSheet("background: #7f8c8d; color: #fff; padding: 3px; border-radius: 3px;")
+            self.st_gps2.setText("NONE")
+            
+        self.val_mot.setText("DONE")
+        self.st_mot.setStyleSheet("background: #27ae60; color: #fff; padding: 3px; border-radius: 3px;")
+        self.st_mot.setText("USER VERIFIED")
+        
+        self.log("Please visually inspect all four motors to ensure they are rotating.", "#fff")
+
+class RCBar(QWidget):
+    def __init__(self, name, orientation=Qt.Orientation.Horizontal):
+        super().__init__()
+        self.name = name
+        self.orientation = orientation
+        
+        self.bar = QProgressBar()
+        self.bar.setRange(800, 2200) 
+        self.bar.setValue(1500)
+        self.bar.setOrientation(orientation)
+        self.bar.setTextVisible(False) 
+        
+        if orientation == Qt.Orientation.Horizontal:
+            self.bar.setFixedHeight(35) 
+        else:
+            self.bar.setFixedWidth(55)
+            
+        self.bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 4px;
+                background-color: #2c3e50;
+            }
+            QProgressBar::chunk {
+                background-color: #8cc63f; 
+                border-radius: 3px;
+            }
+        """)
+
+        self.label = QLabel(f"{name} 1500")
+        self.label.setStyleSheet("color: white; font-weight: bold; font-size: 12px; background: transparent;")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        if orientation == Qt.Orientation.Horizontal:
+            layout = QGridLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.bar, 0, 0)
+            layout.addWidget(self.label, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        else:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.bar, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.label, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def update_val(self, val):
+        if 0 < val < 65535:  
+            self.bar.setValue(val)
+            self.label.setText(f"{self.name} {val}")
+
+
+class RadioTestWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+
+        title = QLabel("RADIO CHECK")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #8cc63f;")
+        layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # --- SERVING VARIABLES FOR INTERPOLATION ALGORITHM (SMOOTHING 60FPS) ---
+        self.target_roll = 0.0
+        self.target_pitch = 0.0
+        self.target_yaw_rate = 0.0
+        
+        self.current_roll = 0.0
+        self.current_pitch = 0.0
+        self.current_yaw = 0.0
+
+        # Bộ đếm khung hình 60Hz (16ms)
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self.animate_drone)
+        self.anim_timer.start(16) 
+
+        # --- 1. 3D DRONE ---
+        self.drone_3d = drone3DWidget()
+        self.drone_3d.btn_calib.hide()  
+        self.drone_3d.setMinimumHeight(280)
+        self.drone_3d.view.setCameraPosition(distance=25, elevation=30, azimuth=45)
+        layout.addWidget(self.drone_3d, 1)
+
+        # --- 2. LAYOUT OF STICKS AND AUX BARS ---
+        main_layout = QHBoxLayout()
+
+        left_group = QGroupBox("MAIN STICKS (1-4)")
+        left_group.setStyleSheet("QGroupBox { font-weight: bold; color: #ecf0f1; border: 1px solid #555; margin-top: 10px; }")
+        stick_layout = QGridLayout(left_group)
+
+        self.bar_roll = RCBar("Roll (rc1)", Qt.Orientation.Horizontal)
+        self.bar_pitch = RCBar("Pitch (rc2)", Qt.Orientation.Vertical)
+        self.bar_throttle = RCBar("Throttle (rc3)", Qt.Orientation.Vertical)
+        self.bar_yaw = RCBar("Yaw (rc4)", Qt.Orientation.Horizontal)
+
+        self.bar_pitch.setMinimumHeight(220)
+        self.bar_throttle.setMinimumHeight(220)
+        self.bar_roll.setMinimumWidth(320)
+        self.bar_yaw.setMinimumWidth(320)
+
+        stick_layout.addWidget(self.bar_roll, 0, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        stick_layout.addWidget(self.bar_pitch, 1, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        stick_layout.addWidget(self.bar_throttle, 1, 2, alignment=Qt.AlignmentFlag.AlignCenter)
+        stick_layout.addWidget(self.bar_yaw, 2, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        main_layout.addWidget(left_group, 1)
+
+        right_group = QGroupBox("AUX CHANNELS (5-16)")
+        right_group.setStyleSheet("QGroupBox { font-weight: bold; color: #ecf0f1; border: 1px solid #555; margin-top: 10px; }")
+        aux_layout = QGridLayout(right_group)
+
+        self.aux_bars = {}
+        row, col = 0, 0
+        for i in range(5, 17):
+            bar = RCBar(f"Radio {i}", Qt.Orientation.Horizontal)
+            bar.setFixedHeight(22)
+            self.aux_bars[i] = bar
+            aux_layout.addWidget(bar, row, col)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
+
+        main_layout.addWidget(right_group, 1)
+        layout.addLayout(main_layout, 1)
+
+    def animate_drone(self):
+        self.current_roll += (self.target_roll - self.current_roll) * 0.15
+        self.current_pitch += (self.target_pitch - self.current_pitch) * 0.15
+
+        self.current_yaw = (self.current_yaw + self.target_yaw_rate) % 360
+        
+        self.drone_3d.update_attitude(self.current_roll, self.current_pitch, self.current_yaw)
+
+    def process_telemetry(self, data):
+        t = data.get("type")
+        if t == "RC_CHANNELS" and "chans" in data:
+            chans = data["chans"]
+            if len(chans) >= 4:
+                rc1, rc2, rc3, rc4 = chans[0], chans[1], chans[2], chans[3]
+                
+                self.bar_roll.update_val(rc1)
+                self.bar_pitch.update_val(rc2)
+                self.bar_throttle.update_val(rc3)
+                self.bar_yaw.update_val(rc4)
+
+                def apply_deadband(val, center=1500, deadband=20):
+                    if abs(val - center) < deadband:
+                        return center
+                    return val
+
+                rc1_db = apply_deadband(rc1)
+                rc2_db = apply_deadband(rc2)
+                rc4_db = apply_deadband(rc4)
+
+                self.target_roll = (rc1_db - 1500) / 500.0 * 45.0
+                self.target_pitch = -(rc2_db - 1500) / 500.0 * 45.0 
+                self.target_yaw_rate = -(rc4_db - 1500) / 500.0 * 2.5 
+
+            for i in range(5, 17):
+                idx = i - 1
+                if idx < len(chans):
+                    self.aux_bars[i].update_val(chans[idx])
+
 class DroneApp(QMainWindow):
     @staticmethod
     def get_lipo_s_count(voltage):
@@ -806,10 +1407,20 @@ class DroneApp(QMainWindow):
         # --- INITIATING CORE VIDEO RECEIPT FLOW ---
         self.video_thread = VideoThread(port=9999)
         self.video_thread.change_pixmap_signal.connect(self.update_video_frame)
-        self.video_thread.start()
-        
+        #self.video_thread.start()
+        self.current_video_mode = "RGB"
         # Set the default mode to RGB when open first time
         self.set_video_mode("RGB")
+
+        # --- IMU/VIBE LOGGING BUFFER ---
+        self.imu_vibe_file = None
+        self.imu_vibe_writer = None
+        self.current_imu_temp_path = ""
+        self.imu_buffer = {
+            'r': 0.0, 'p': 0.0, 'y': 0.0, 
+            'vib_x': 0.0, 'vib_y': 0.0, 'vib_z': 0.0,
+            'acc_x': 0.0, 'acc_y': 0.0, 'acc_z': 0.0
+        }
 
     def send_camera_command(self, command):
         if command == "START_STREAM" and self.mav_worker is None:
@@ -820,7 +1431,7 @@ class DroneApp(QMainWindow):
 
         # IP RASPBERRY PI
         #PI_IP = "192.168.1.22" 
-        PI_IP = CONFIG.get("network", {}).get("companion_ip", "100.112.194.109")
+        PI_IP = CONFIG.get("network", {}).get("companion_ip", "100.104.204.36")
         PI_PORT = CONFIG.get("network", {}).get("companion_port", 8888)
         
         try:
@@ -828,14 +1439,20 @@ class DroneApp(QMainWindow):
             sock.sendto(command.encode('utf-8'), (PI_IP, PI_PORT))
             
             if command == "START_STREAM":
-                self.is_camera_on = True 
+                self.is_camera_on = True
+                if not self.video_thread.isRunning():
+                    self.video_thread = VideoThread(port=9999)
+                    self.video_thread.change_pixmap_signal.connect(self.update_video_frame)
+                    self.set_video_mode(getattr(self, 'current_video_mode', 'RGB'))
+                    self.video_thread.start() 
                 if hasattr(self, 'ai_log'):
                     self.ai_log.append("<span style='color: #2ecc71;'>[CAMERA] Sent command to turn ON the video stream...</span>")
             
             elif command == "STOP_STREAM":
                 self.is_camera_on = False 
                 self.stop_video_record() 
-                
+                if hasattr(self, 'video_thread') and self.video_thread.isRunning():
+                    self.video_thread.stop()
                 if hasattr(self, 'video_frame'):
                     self.video_frame.setPixmap(QPixmap()) 
                     self.video_frame.setText("THE CAMERA IS OFF")
@@ -849,6 +1466,7 @@ class DroneApp(QMainWindow):
 
     # --- FUNCTION TO CALL MODULE FILES TO CHANGE MODES ---
     def set_video_mode(self, mode):
+        self.current_video_mode = mode
         if not hasattr(self, 'video_thread'): return
         
         if mode == "RGB":
@@ -971,7 +1589,7 @@ class DroneApp(QMainWindow):
         top_row = QHBoxLayout()
         logos = QHBoxLayout()
         paths = [
-            CONFIG.get("paths", {}).get("flag_vn", "VN_flag.jpg"), 
+            CONFIG.get("paths", {}).get("flag_vn", "KCK_logo.jpg"), 
             CONFIG.get("paths", {}).get("flag_dut", "image002.jpg")
         ]
         for p in paths:
@@ -980,7 +1598,7 @@ class DroneApp(QMainWindow):
             logos.addWidget(lbl)
         top_row.addLayout(logos)
         
-        title = QLabel("DUT MISSION CONTROL STATION"); title.setStyleSheet("font-size: 20px; font-weight: bold; color: #e74c3c; margin-left: 15px;")
+        title = QLabel("DUT MISSION CONTROL STATION"); title.setStyleSheet("font-size: 28px; font-weight: bold; color: #e74c3c; margin-left: 15px;")
         top_row.addWidget(title)
         
         top_row.addStretch()
@@ -1001,9 +1619,10 @@ class DroneApp(QMainWindow):
         self.nav_btn_style = "QPushButton { background-color: #2c3e50; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #34495e; } QPushButton:hover { background-color: #34495e; }"
         self.active_btn_style = "background-color: #3498db; color: white; font-weight: bold; font-size: 12px; padding: 8px 12px; border-radius: 5px; border: 1px solid #2980b9;"
         
-        self.btn_nav_flight = QPushButton("FLIGHT DATA"); self.btn_nav_mission = QPushButton("MISSION"); self.btn_nav_video = QPushButton("AI VIDEO STREAM"); self.btn_nav_replay = QPushButton("FLIGHT REPLAY"); self.btn_nav_setup = QPushButton("3D SETUP")
+        self.btn_nav_flight = QPushButton("FLIGHT DATA"); self.btn_nav_mission = QPushButton("MISSION"); self.btn_nav_video = QPushButton("AI VIDEO STREAM"); self.btn_nav_replay = QPushButton("DATA LOG REVIEW"); self.btn_nav_setup = QPushButton("3D SETUP"); self.btn_nav_qc = QPushButton("DRONE CHECK")
         self.btn_nav_config = QPushButton("CONFIG")
-        btns = [self.btn_nav_flight, self.btn_nav_mission, self.btn_nav_video, self.btn_nav_replay, self.btn_nav_config, self.btn_nav_setup]
+        self.btn_nav_radio = QPushButton("RADIO SETUP")
+        btns = [self.btn_nav_flight, self.btn_nav_mission, self.btn_nav_video, self.btn_nav_replay, self.btn_nav_config, self.btn_nav_setup, self.btn_nav_qc, self.btn_nav_radio]
         
         nav_row.addStretch() 
         for idx, btn in enumerate(btns):
@@ -1032,6 +1651,7 @@ class DroneApp(QMainWindow):
         self.btn_loiter = QPushButton("LOITER"); self.btn_loiter.setStyleSheet("background: #8e44ad; font-weight: bold; color: white; padding: 5px;")
         self.btn_loiter.clicked.connect(lambda: self.set_mode("LOITER"))
 
+        
         action_buttons = [self.btn_arm, self.btn_disarm, self.btn_takeoff, self.btn_loiter, self.btn_land, self.btn_rtl]
         for btn in action_buttons:
             btn.setFixedWidth(64)  
@@ -1247,7 +1867,9 @@ class DroneApp(QMainWindow):
         ap.addWidget(self.ai_log); vl.addWidget(self.video_frame, 3); vl.addLayout(ap, 1); self.stacked_widget.addWidget(self.page_video)
     
     # PAGE 3: FLIGHT REPLAY
-        self.page_replay = FlightReplayWidget()
+        # self.page_replay = FlightReplayWidget()
+        # self.stacked_widget.addWidget(self.page_replay)
+        self.page_replay = LogReviewWidget()
         self.stacked_widget.addWidget(self.page_replay)
 
         # PAGE 4: CONFIG & PARAMETER TUNING
@@ -1255,7 +1877,46 @@ class DroneApp(QMainWindow):
         cfg_layout = QVBoxLayout(self.page_config)
 
         # 1. Quick Tuning - WPNAV_SPEED
-        quick_group = QGroupBox("QUICK TUNING (AUTO MODE)")
+        # quick_group = QGroupBox("QUICK TUNING (AUTO MODE)")
+        # quick_group.setStyleSheet("""
+        #     QGroupBox { 
+        #         font-weight: bold; 
+        #         color: #f39c12; 
+        #         border: 1px solid #333; 
+        #         border-radius: 5px; 
+        #         margin-top: 15px; 
+        #         padding-top: 15px; 
+        #     } 
+        #     QGroupBox::title { 
+        #         subcontrol-origin: margin; 
+        #         subcontrol-position: top left;
+        #         left: 10px; 
+        #         top: 0px;
+        #         padding: 0 3px; 
+        #     }
+        # """)
+        # quick_lay = QHBoxLayout(quick_group)
+        
+        # quick_lay.addWidget(QLabel("Auto Flight Speed (WPNAV_SPEED):"))
+        # self.spin_wp_speed = QDoubleSpinBox()
+        # self.spin_wp_speed.setRange(0, 50)
+        # self.spin_wp_speed.setSuffix(" m/s")
+        # self.spin_wp_speed.setMinimumWidth(150)
+        
+        # self.btn_set_wp_speed = QPushButton("SET SPEED")
+        # self.btn_set_wp_speed.setStyleSheet("background: #d35400; font-weight: bold; color: white; padding: 5px;")
+        # self.btn_set_wp_speed.clicked.connect(lambda: self.write_param("WPNAV_SPEED", self.spin_wp_speed.value() * 100.0))
+        
+        # quick_lay.addWidget(self.spin_wp_speed)
+        # quick_lay.addWidget(self.btn_set_wp_speed)
+        # quick_lay.addStretch()
+        # cfg_layout.addWidget(quick_group)
+
+        self.page_config = QWidget()
+        cfg_layout = QVBoxLayout(self.page_config)
+
+        # 1. Quick Tuning - Advanced Speeds
+        quick_group = QGroupBox("QUICK TUNING (AUTO / RTL)")
         quick_group.setStyleSheet("""
             QGroupBox { 
                 font-weight: bold; 
@@ -1273,21 +1934,67 @@ class DroneApp(QMainWindow):
                 padding: 0 3px; 
             }
         """)
-        quick_lay = QHBoxLayout(quick_group)
+
+        quick_lay = QGridLayout(quick_group)
+        quick_lay.setHorizontalSpacing(5)
+        quick_lay.setVerticalSpacing(10)
+
+        def add_tuning_row(row, label_text, param_name, min_val, max_val, step, default_val, suffix, multiplier):
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("font-weight: bold; color: #ecf0f1;")
+            lbl.setMinimumWidth(130)
+            
+            spin = QDoubleSpinBox()
+            spin.setRange(min_val, max_val)
+            spin.setSingleStep(step)
+            spin.setValue(default_val)
+            spin.setSuffix(suffix)
+            spin.setMinimumWidth(150)
+            spin.setStyleSheet("""
+                QDoubleSpinBox {
+                    background: #2c3e50; 
+                    color: white; 
+                    border-radius: 3px; 
+                    border: 1px solid #34495e;
+                    padding: 0px 15px 0px 5px; 
+                    min-height: 25px; 
+                }
+            """)
+            
+            btn = QPushButton(f"SET {param_name}")
+            btn.setStyleSheet("background: #d35400; font-weight: bold; color: white; padding: 5px; border-radius: 3px;")
+            btn.clicked.connect(lambda checked, p=param_name, m=multiplier, s=spin: self.write_param(p, s.value() * m))
+            
+            quick_lay.addWidget(lbl, row, 0)
+            quick_lay.addWidget(spin, row, 1)
+            quick_lay.addWidget(btn, row, 2)
+            return spin
+
+        # Row 0: WPNAV_SPEED 
+        self.spin_wp_speed = add_tuning_row(
+            row=0, label_text="Auto Flight Speed:", param_name="WPNAV_SPEED", 
+            min_val=0, max_val=50, step=0.5, default_val=3.0, suffix=" m/s", multiplier=100.0)
+
+        # Row 1: WPNAV_SPEED_DN 
+        self.spin_wp_speed_dn = add_tuning_row(
+            row=1, label_text="Descent Speed:", param_name="WPNAV_SPEED_DN", 
+            min_val=0, max_val=10, step=0.1, default_val=1.0, suffix=" m/s", multiplier=100.0)
+
+        # Row 2: LAND_SPEED 
+        self.spin_land_speed = add_tuning_row(
+            row=2, label_text="Final Land Speed:", param_name="LAND_SPEED", 
+            min_val=0, max_val=5, step=0.1, default_val=0.3, suffix=" m/s", multiplier=100.0)
+
+        # Row 3: LAND_ALT_LOW 
+        self.spin_land_alt = add_tuning_row(
+            row=3, label_text="Land Speed Alt:", param_name="LAND_ALT_LOW", 
+            min_val=0, max_val=50, step=1.0, default_val=10.0, suffix=" m", multiplier=100.0)
+
+        quick_lay.setColumnStretch(0, 0) 
+        quick_lay.setColumnStretch(1, 0) 
+        quick_lay.setColumnStretch(2, 0) 
+        quick_lay.setColumnStretch(3, 1)
         
-        quick_lay.addWidget(QLabel("Auto Flight Speed (WPNAV_SPEED):"))
-        self.spin_wp_speed = QDoubleSpinBox()
-        self.spin_wp_speed.setRange(0, 50)
-        self.spin_wp_speed.setSuffix(" m/s")
-        self.spin_wp_speed.setMinimumWidth(150)
-        
-        self.btn_set_wp_speed = QPushButton("SET SPEED")
-        self.btn_set_wp_speed.setStyleSheet("background: #d35400; font-weight: bold; color: white; padding: 5px;")
-        self.btn_set_wp_speed.clicked.connect(lambda: self.write_param("WPNAV_SPEED", self.spin_wp_speed.value() * 100.0))
-        
-        quick_lay.addWidget(self.spin_wp_speed)
-        quick_lay.addWidget(self.btn_set_wp_speed)
-        quick_lay.addStretch()
         cfg_layout.addWidget(quick_group)
 
         self.search_box = QLineEdit()
@@ -1324,7 +2031,14 @@ class DroneApp(QMainWindow):
         # PAGE 5: 3D SETUP 
         self.page_setup = drone3DWidget(mav_worker=self.mav_worker, log_callback=self.append_log)
         self.stacked_widget.addWidget(self.page_setup)
-        self.switch_page(0)
+
+        # PAGE 6: QC & MAINTENANCE
+        self.page_qc = QCMaintenanceWidget(main_app=self)  # <--- TRUYỀN main_app=self VÀO ĐÂY
+        self.stacked_widget.addWidget(self.page_qc)
+
+        # PAGE 7: RADIO CALIBRATION / TEST  
+        self.page_radio = RadioTestWidget()
+        self.stacked_widget.addWidget(self.page_radio)
 
     def update_flight_time(self):
         if hasattr(self, 'pfd') and self.pfd.is_armed and hasattr(self, 'start_time'):
@@ -1372,11 +2086,20 @@ class DroneApp(QMainWindow):
             self.current_csv_temp_path = os.path.join(log_dir, f"telemetry_{time_str}.csv")
             self.current_kml_temp_path = os.path.join(log_dir, f"trajectory_{time_str}.kml")
             
+            self.current_imu_temp_path = os.path.join(log_dir, f"imu_vibe_{time_str}.csv")
             try:
-                # CSV
                 self.csv_file = open(self.current_csv_temp_path, 'w', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
-                self.csv_writer.writerow(['Timestamp', 'Mode', 'Armed', 'Alt', 'Spd', 'Yaw', 'Lat', 'Lon', 'Volt', 'HDOP', 'RSSI'])
+                self.csv_writer.writerow(['Timestamp', 'Mode', 'Armed', 'Alt', 'Spd', 'Yaw', 'Lat', 'Lon', 'Volt', 'Curr', 'Throttle', 'HDOP', 'RSSI'])
+                
+                self.imu_vibe_file = open(self.current_imu_temp_path, 'w', newline='')
+                self.imu_vibe_writer = csv.writer(self.imu_vibe_file)
+                self.imu_vibe_writer.writerow([
+                    'Timestamp', 'Roll', 'Pitch', 'Yaw', 
+                    'VibeX', 'VibeY', 'VibeZ', 
+                    'AccX', 'AccY', 'AccZ', 
+                    'Target_Roll', 'Target_Pitch', 'Target_Yaw', 'Alt_Error', 'X_Track_Err'
+                ])
                 
                 # KML
                 self.kml_file = open(self.current_kml_temp_path, 'w')
@@ -1386,15 +2109,17 @@ class DroneApp(QMainWindow):
                 self.btn_record_telemetry.setText("STOP TELEMETRY LOG")
                 self.btn_record_telemetry.setStyleSheet("background: #e74c3c; font-weight: bold; color: white; padding: 15px; border-radius: 5px;")
                 
-                self.append_log("Telemetry recording started...")
+                self.append_log("Telemetry & IMU recording started...")
                 if hasattr(self, 'tts_worker'):
                     self.tts_worker.speak("Telemetry recording started")
                     
             except Exception as e:
-                self.append_log(f"CSV/KML Error: {e}")
+                self.append_log(f"Log Error: {e}")
         else:
             self.is_recording = False
             if self.csv_file: self.csv_file.close()
+            if self.imu_vibe_file: self.imu_vibe_file.close()
+            
             if self.kml_file:
                 self.kml_file.write('\n</coordinates>\n</LineString>\n</Placemark>\n</Document>\n</kml>')
                 self.kml_file.close()
@@ -1408,14 +2133,17 @@ class DroneApp(QMainWindow):
                 try:
                     new_csv = os.path.join(folder_path, os.path.basename(self.current_csv_temp_path))
                     new_kml = os.path.join(folder_path, os.path.basename(self.current_kml_temp_path))
+                    new_imu = os.path.join(folder_path, os.path.basename(self.current_imu_temp_path))
                     
                     shutil.move(self.current_csv_temp_path, new_csv)
                     shutil.move(self.current_kml_temp_path, new_kml)
-                    self.append_log(f"The Telemetry file has been moved: <b style='color:#f39c12;'>{folder_path}</b>")
+                    shutil.move(self.current_imu_temp_path, new_imu)
+                    
+                    self.append_log(f"All Log files moved to: <b style='color:#f39c12;'>{folder_path}</b>")
                 except Exception as e:
-                    self.append_log(f"Error saving telemetry file: {e}")
+                    self.append_log(f"Error saving log files: {e}")
             else:
-                self.append_log("Even after de-saving, temporary files remain in the Telemetry_Logs folder.")
+                self.append_log("Temporary files remain in the Telemetry_Logs folder.")
 
             if hasattr(self, 'tts_worker'):
                 self.tts_worker.speak("Telemetry recording stopped")
@@ -1452,7 +2180,8 @@ class DroneApp(QMainWindow):
         self.btn_nav_replay.setStyleSheet(self.active_btn_style if index == 3 else self.nav_btn_style)
         self.btn_nav_config.setStyleSheet(self.active_btn_style if index == 4 else self.nav_btn_style)
         self.btn_nav_setup.setStyleSheet(self.active_btn_style if index == 5 else self.nav_btn_style)
-
+        self.btn_nav_qc.setStyleSheet(self.active_btn_style if index == 6 else self.nav_btn_style)
+        self.btn_nav_radio.setStyleSheet(self.active_btn_style if index == 7 else self.nav_btn_style)
         if index != 2 and hasattr(self, 'video_frame'):
             self.video_frame.setPixmap(QPixmap()) 
             self.video_frame.setText("NO VIDEO SIGNAL")
@@ -1682,6 +2411,8 @@ class DroneApp(QMainWindow):
             self.mav_worker = MavlinkWorker(conn, baudrate=baud)
             self.page_mission.mav_worker = self.mav_worker
             self.page_setup.mav_worker = self.mav_worker
+            if hasattr(self, 'page_qc'):
+                self.page_qc.mav_worker = self.mav_worker
             self.mav_worker.data_changed.connect(self.update_ui)
             
             self.mav_worker.connection_failed.connect(handle_connection_error)
@@ -1716,15 +2447,23 @@ class DroneApp(QMainWindow):
         t = data.get("type")
         if not t: return
         
+        if hasattr(self, 'page_qc'):
+            self.page_qc.process_telemetry(data)
+        if hasattr(self, 'page_radio'):
+            self.page_radio.process_telemetry(data)
         # 1. RECORD LOG TELEMETRY & KML (Post-Flight)
-        if self.is_recording and t == 'VFR_HUD':
-            ts = QDateTime.currentDateTime().toString("hh:mm:ss.zzz")
-            # Update CSV writer: HDOP/RSSI
-            self.csv_writer.writerow([ts, self.pfd.flight_mode, self.pfd.is_armed, data.get('alt', 0), data.get('gs', 0), self.pfd.heading, self.drone_pos[0], self.drone_pos[1], self.pfd.batt_v, self.pfd.gps_hdop, self.pfd.rssi])
-            
-            # Record KML trajectory
-            if hasattr(self, 'kml_file') and self.kml_file and self.drone_pos[0] != 0:
-                self.kml_file.write(f"{self.drone_pos[1]},{self.drone_pos[0]},{data.get('alt', 0)} ")
+        elif t == 'VFR_HUD':
+            self.current_throttle = data.get('throttle', getattr(self, 'current_throttle', 0))
+    
+            if self.is_recording:
+                ts = QDateTime.currentDateTime().toString("hh:mm:ss.zzz")
+                self.csv_writer.writerow([
+                    ts, self.pfd.flight_mode, self.pfd.is_armed, 
+                    self.pfd.alt, data.get('gs', 0), self.pfd.heading, 
+                    self.drone_pos[0], self.drone_pos[1], 
+                    self.pfd.batt_v, self.pfd.batt_a, self.current_throttle, 
+                    self.pfd.gps_hdop, self.pfd.rssi
+                ])
         
         # 2. MAVLINK HANDLER
         if t == "LOG": 
@@ -1741,7 +2480,16 @@ class DroneApp(QMainWindow):
                     self.append_log(f"Mode: <b style='color: white;'>{current_mode}</b>")
                     
                     if self.last_mode is not None and hasattr(self, 'tts_worker'): 
-                        self.tts_worker.speak(f"Mode {current_mode}") 
+                        pronunciation_dict = {
+                            "ALT_HOLD": "Altitude Hold",
+                            "RTL": "Return To Launch",
+                            "POSHOLD": "Position Hold",
+                            "STABILIZE": "Stabilize",
+                            "ACRO": "Acrobatic"
+                        }
+                        speak_mode = pronunciation_dict.get(current_mode, current_mode.replace('_', ' '))
+                        
+                        self.tts_worker.speak(f"Mode {speak_mode}") 
                     
                     if self.last_mode is not None: 
                         self.pfd.status_msg = "Ready" 
@@ -1751,9 +2499,13 @@ class DroneApp(QMainWindow):
                 if current_armed != self.last_armed:
                     is_armed_str = "ARMED" if current_armed else "DISARMED"
                     self.append_log(is_armed_str)
+
+                    if self.last_armed is not None and hasattr(self, 'tts_worker'):
+                        if not getattr(self, 'is_qc_testing', False): 
+                            self.tts_worker.speak(f"Vehicle {is_armed_str}")
                     
-                    if self.last_armed is not None and hasattr(self, 'tts_worker'): 
-                        self.tts_worker.speak(f"Vehicle {is_armed_str}")
+                    # if self.last_armed is not None and hasattr(self, 'tts_worker'): 
+                    #     self.tts_worker.speak(f"Vehicle {is_armed_str}")
                     
                     if current_armed:
                         self.start_time = QDateTime.currentDateTime()
@@ -1768,15 +2520,67 @@ class DroneApp(QMainWindow):
                 self.pfd.flight_mode = current_mode
                 self.pfd.update()
             
+        # elif t == 'ATTITUDE':
+        #     self.pfd.roll, self.pfd.pitch = data.get("r", 0), data.get("p", 0)
+        #     self.val_yaw.setText(f"{data.get('y', 0):.2f}")
+        #     self.pfd.update()
+        #     import time
+        #     if not hasattr(self, 'last_att_update'): 
+        #         self.last_att_update = 0
+                
+        #     if time.time() - self.last_att_update > 0.05: # Vẽ tối đa 20 lần/giây
+        #         if hasattr(self, 'imu_graph'):
+        #             self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+        #         if hasattr(self, 'drone_3d'):
+        #             self.drone_3d.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+        #         if hasattr(self, 'page_setup'):
+        #             self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+        #         self.last_att_update = time.time()
+
+        #     if hasattr(self, 'imu_graph'):
+        #         self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+
+        #     if hasattr(self, 'drone_3d'):
+        #         self.drone_3d.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+            
+        #     if hasattr(self, 'page_setup'):
+        #         self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
+
+        # elif t == 'VIBRATION':
+        #     if hasattr(self, 'imu_graph') and all(k in data for k in ("vib_x", "vib_y", "vib_z")):
+        #         self.imu_graph.update_vibration(data["vib_x"], data["vib_y"], data["vib_z"])
+
         elif t == 'ATTITUDE':
             self.pfd.roll, self.pfd.pitch = data.get("r", 0), data.get("p", 0)
             self.val_yaw.setText(f"{data.get('y', 0):.2f}")
             self.pfd.update()
+            
+            # ---------------------------------------------------------
+            self.imu_buffer['r'] = data.get("r", 0)
+            self.imu_buffer['p'] = data.get("p", 0)
+            self.imu_buffer['y'] = data.get("y", 0)
+
+            target_roll = getattr(self, 'last_nav_roll', 0)
+            target_pitch = getattr(self, 'last_nav_pitch', 0)
+            target_yaw = getattr(self, 'last_nav_yaw', 0)
+            alt_err = getattr(self, 'last_alt_err', 0)
+            xtrack = getattr(self, 'last_xtrack', 0)
+            
+            if self.is_recording and hasattr(self, 'imu_vibe_writer') and self.imu_vibe_writer:
+                ts = QDateTime.currentDateTime().toString("hh:mm:ss.zzz")
+                self.imu_vibe_writer.writerow([
+                    ts, 
+                    f"{self.imu_buffer['r']:.2f}", f"{self.imu_buffer['p']:.2f}", f"{self.imu_buffer['y']:.2f}",
+                    f"{self.imu_buffer['vib_x']:.2f}", f"{self.imu_buffer['vib_y']:.2f}", f"{self.imu_buffer['vib_z']:.2f}",
+                    f"{self.imu_buffer['acc_x']:.2f}", f"{self.imu_buffer['acc_y']:.2f}", f"{self.imu_buffer['acc_z']:.2f}",
+                    f"{target_roll:.2f}", f"{target_pitch:.2f}", f"{target_yaw:.2f}", f"{alt_err:.2f}", f"{xtrack:.2f}"
+                ])
+            # ---------------------------------------------------------
             import time
             if not hasattr(self, 'last_att_update'): 
                 self.last_att_update = 0
                 
-            if time.time() - self.last_att_update > 0.05: # Vẽ tối đa 20 lần/giây
+            if time.time() - self.last_att_update > 0.05: 
                 if hasattr(self, 'imu_graph'):
                     self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
                 if hasattr(self, 'drone_3d'):
@@ -1784,19 +2588,20 @@ class DroneApp(QMainWindow):
                 if hasattr(self, 'page_setup'):
                     self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
                 self.last_att_update = time.time()
-
-            if hasattr(self, 'imu_graph'):
-                self.imu_graph.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
-
-            if hasattr(self, 'drone_3d'):
-                self.drone_3d.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
             
-            if hasattr(self, 'page_setup'):
-                self.page_setup.update_attitude(data.get("r", 0), data.get("p", 0), data.get("y", 0))
 
         elif t == 'VIBRATION':
+            self.imu_buffer['vib_x'] = data.get("vib_x", 0)
+            self.imu_buffer['vib_y'] = data.get("vib_y", 0)
+            self.imu_buffer['vib_z'] = data.get("vib_z", 0)
+
             if hasattr(self, 'imu_graph') and all(k in data for k in ("vib_x", "vib_y", "vib_z")):
                 self.imu_graph.update_vibration(data["vib_x"], data["vib_y"], data["vib_z"])
+
+        elif t in ['RAW_IMU', 'SCALED_IMU']:
+            self.imu_buffer['acc_x'] = data.get("acc_x", 0)
+            self.imu_buffer['acc_y'] = data.get("acc_y", 0)
+            self.imu_buffer['acc_z'] = data.get("acc_z", 0)
 
         elif t == 'VFR_HUD':
             #self.pfd.alt = data.get('alt', 0)
@@ -1820,8 +2625,13 @@ class DroneApp(QMainWindow):
             self.rc_healthy = data.get('rc_ok', True)
             if not self.rc_healthy:
                 self.pfd.rssi = 0
+            import time
             if 0 < self.pfd.batt_p < 20 and hasattr(self, 'tts_worker'):
-                 self.tts_worker.speak("Warning, battery low")
+                current_time = time.time()
+                # Chỉ cho phép đọc cảnh báo 30 giây một lần
+                if current_time - getattr(self, 'last_battery_warn_time', 0) > 30:
+                    self.tts_worker.speak("Warning, battery low")
+                    self.last_battery_warn_time = current_time
                  
         elif t == 'STATUSTEXT':
             status_msg = data.get('status_msg', '')
@@ -1832,8 +2642,14 @@ class DroneApp(QMainWindow):
             self.pfd.update() 
             
             msg_lower = status_msg.lower()
-            if ("fail" in msg_lower or "error" in msg_lower or "reject" in msg_lower) and hasattr(self, 'tts_worker'):
-                self.tts_worker.speak(status_msg)
+            alert_keywords = [
+                "fail", "error", "reject", "glitch", 
+                "high", "low", "crash", "warn", 
+                "critical", "prearm", "leak", "not neutral", "not armable", "arm"
+            ]
+            if any(kw in msg_lower for kw in alert_keywords) and hasattr(self, 'tts_worker'):
+                speak_text = status_msg.replace("PreArm:", "Pre-arm check:")
+                self.tts_worker.speak(speak_text)
                 
             QTimer.singleShot(5000, lambda: setattr(self.pfd, 'status_msg', 'Ready'))
             QTimer.singleShot(5005, self.pfd.update)
@@ -1853,6 +2669,13 @@ class DroneApp(QMainWindow):
             
             self.drone_course = data.get('cog', 0)
             self.update_map()
+
+            if self.is_recording and hasattr(self, 'kml_file') and self.kml_file:
+                alt_kml = getattr(self.pfd, 'alt', 0)
+                
+                self.kml_file.write(f"{new_lon},{new_lat},{alt_kml}\n")
+                
+                self.kml_file.flush()
             
             if hasattr(self, 'page_mission') and hasattr(self.page_mission, 'update_drone_position'):
                 self.page_mission.update_drone_position(self.drone_pos[0], self.drone_pos[1], self.drone_heading, self.drone_course)
@@ -1886,6 +2709,11 @@ class DroneApp(QMainWindow):
         
         elif t == 'NAV_CONTROLLER_OUTPUT':
             self.val_dist_wp.setText(f"{data.get('wp_dist', 0):.1f}")
+            self.last_nav_roll = data.get("nav_roll", 0)
+            self.last_nav_pitch = data.get("nav_pitch", 0)
+            self.last_nav_yaw = data.get("nav_bearing", 0)
+            self.last_alt_err = data.get("alt_error", 0)
+            self.last_xtrack = data.get("xtrack_error", 0)
             
         elif t == 'MISSION_CURRENT':
             self.current_wp = data.get('seq', 0)
@@ -1907,7 +2735,13 @@ class DroneApp(QMainWindow):
             
             if pid == "WPNAV_SPEED":
                 self.spin_wp_speed.setValue(pval / 100.0)
-            
+            elif pid == "WPNAV_SPEED_DN":
+                self.spin_wp_speed_dn.setValue(pval / 100.0)
+            elif pid == "LAND_SPEED":
+                self.spin_land_speed.setValue(pval / 100.0)
+            elif pid == "LAND_ALT_LOW":
+                self.spin_land_alt.setValue(pval / 100.0)
+
             if pid in self.param_tree_items:
                 self.param_tree_items[pid].setText(1, str(pval))
             else:
@@ -1969,15 +2803,27 @@ class DroneApp(QMainWindow):
     def closeEvent(self, event):
         self.stop_video_record() 
         self.send_camera_command("STOP_STREAM")
-        if hasattr(self, 'video_thread'):
+        
+        if hasattr(self, 'mav_worker') and self.mav_worker:
+            self.mav_worker.stop()  
+        if hasattr(self, 'video_thread') and self.video_thread:
             self.video_thread.stop()
-        if self.mav_worker:
-            self.mav_worker.stop()
+            
         if hasattr(self, 'pl_thread') and self.pl_thread:
             self.pl_thread.stop()
-        if hasattr(self, 'map_server_thread'):
+            
+        if hasattr(self, 'map_server_thread') and self.map_server_thread:
             self.map_server_thread.stop()
-        event.accept()
+            
+        if hasattr(self, 'tts_worker') and self.tts_worker:
+            try:
+                self.tts_worker.running = False
+                if not self.tts_worker.wait(1000):
+                    self.tts_worker.terminate()
+                    self.tts_worker.wait(100)
+            except: pass
+            
+        event.accept() 
     
     def confirm_and_send_cmd(self, action_name, color, cmd_func):
         dialog = SlideConfirmDialog(action_name, color, self)

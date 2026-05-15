@@ -26,8 +26,8 @@
         //     attribution: '© Esri & Earthstar Geographics'
         // }).addTo(map);
         L.tileLayer('http://localhost:8080/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                minZoom: 2,
+                maxNativeZoom: 19,
+                maxZoom: 24,
                 attribution: 'DUT MCS Offline/Online Map'
             }).addTo(map);
         window.isDragging = false;

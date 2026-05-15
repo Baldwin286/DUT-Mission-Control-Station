@@ -1,12 +1,14 @@
 import json
 import os
 import math 
+import time
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QTableWidget, QTableWidgetItem, QHeaderView, 
                              QDoubleSpinBox, QAbstractItemView, QFrame, QComboBox)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtWidgets import QGridLayout 
 from pymavlink import mavutil
 
 # ================== Ziczac path algorithm ==================
@@ -117,12 +119,92 @@ class MissionPlannerApp(QWidget):
         super().__init__()
         self.mav_worker = mav_worker; self.log_callback = log_callback 
         self.waypoints = []; self.uploading = False; self.downloading = False
+        self.uploading_type = 0
+        self.upload_fence_list = []
         self.init_ui(); self.load_map()
 
     def log(self, message):
         if self.log_callback: self.log_callback(message)
 
+    # def init_ui(self):
+    #     layout = QHBoxLayout(self)
+    #     left_panel = QFrame(); left_panel.setFixedWidth(380); left_panel.setStyleSheet("background-color: #1e1e1e; border-radius: 10px;")
+    #     v_lay = QVBoxLayout(left_panel)
+    #     v_lay.addWidget(QLabel("MISSION CONFIGURATION", styleSheet="font-size: 18px; font-weight: bold; color: #f39c12;"))
+
+    #     h_alt = QHBoxLayout(); h_alt.addWidget(QLabel("Default Alt (m):"))
+    #     self.spin_alt = QDoubleSpinBox(); self.spin_alt.setRange(2, 500); self.spin_alt.setValue(20)
+    #     h_alt.addWidget(self.spin_alt); v_lay.addLayout(h_alt)
+        
+    #     # --- 3. Direction between path ---
+    #     h_space = QHBoxLayout(); h_space.addWidget(QLabel("Grid Spacing (m):"))
+    #     self.spin_spacing = QDoubleSpinBox(); self.spin_spacing.setRange(1, 100); self.spin_spacing.setValue(5.0)
+    #     h_space.addWidget(self.spin_spacing); v_lay.addLayout(h_space)
+
+    #     h_dir = QHBoxLayout(); h_dir.addWidget(QLabel("Flight Direction:"))
+    #     self.combo_dir = QComboBox()
+    #     self.combo_dir.addItems(["Length", "Width"])
+    #     self.combo_dir.setStyleSheet("background: #34495e; color: white;")
+    #     h_dir.addWidget(self.combo_dir); v_lay.addLayout(h_dir)
+
+    #     self.table = QTableWidget(0, 4); self.table.setHorizontalHeaderLabels(["Seq", "Lat", "Lon", "Alt"])
+    #     self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+    #     self.table.setStyleSheet("QTableWidget { background: #1a1a1a; color: white; }")
+    #     v_lay.addWidget(self.table)
+        
+    #     self.fence_points = []
+        
+    #     # FUNCTION BUTTONS
+    #     self.btn_clear_ui = QPushButton("CLEAR UI MAP"); self.btn_clear_ui.clicked.connect(self.clear_mission)
+    #     self.btn_read = QPushButton("READ FROM FC"); self.btn_read.clicked.connect(self.read_mission)
+    #     self.btn_write = QPushButton("WRITE TO FC"); self.btn_write.clicked.connect(self.write_mission)
+        
+    #     self.btn_draw_fence = QPushButton("DRAW FENCE : OFF"); self.btn_draw_fence.setCheckable(True)
+    #     self.btn_draw_fence.clicked.connect(self.toggle_fence_mode)
+        
+    #     # --- 4. Button active ziczac ---
+    #     self.btn_draw_poly = QPushButton("DRAW ZIG-ZAG AREA : OFF"); self.btn_draw_poly.setCheckable(True)
+    #     self.btn_draw_poly.clicked.connect(self.toggle_poly_mode)
+        
+    #     self.btn_clear_fence = QPushButton("CLEAR FENCE"); self.btn_clear_fence.clicked.connect(self.clear_fence)
+    #     self.btn_upload_fence = QPushButton("UPLOAD FENCE"); self.btn_upload_fence.clicked.connect(self.upload_fence)
+    #     self.btn_delete_fc = QPushButton("DELETE FC MISSION"); self.btn_delete_fc.clicked.connect(self.delete_fc_mission)
+    #     self.btn_auto = QPushButton("START AUTO MODE"); self.btn_auto.clicked.connect(self.set_auto_mode)
+    #     self.btn_abort = QPushButton("ABORT AUTO (LOITER)"); self.btn_abort.clicked.connect(self.abort_auto)
+        
+    #     btn_style = "background: #2c3e50; color: white; font-weight: bold; padding: 10px; border-radius: 5px; margin-top: 2px;"
+        
+    #     btn_list = [self.btn_draw_fence, self.btn_draw_poly, self.btn_clear_fence, self.btn_upload_fence, 
+    #                 self.btn_clear_ui, self.btn_read, self.btn_write, self.btn_delete_fc, self.btn_auto, self.btn_abort]
+                    
+    #     for b in btn_list:
+    #         b.setStyleSheet(btn_style); v_lay.addWidget(b)
+        
+    #     self.btn_write.setStyleSheet(btn_style + "background: #27ae60;")
+    #     self.btn_delete_fc.setStyleSheet(btn_style + "background: #e67e22;") 
+    #     self.btn_auto.setStyleSheet(btn_style + "background: #8e44ad;")
+    #     self.btn_abort.setStyleSheet(btn_style + "background: #c0392b;") 
+
+    #     layout.addWidget(left_panel)
+    #     self.map_view = QWebEngineView()
+    #     self.map_page = MissionWebPage()
+        
+    #     self.map_page.waypoint_clicked.connect(self.add_wp)
+    #     self.map_page.fence_clicked.connect(self.add_fence_point)
+    #     self.map_page.fly_here_clicked.connect(self.action_fly_here) 
+    #     self.map_page.polygon_clicked.connect(self.handle_polygon_received)
+    #     # ----------------------------------------
+    #     self.map_view.setPage(self.map_page)
+    #     from PyQt6.QtWebEngineCore import QWebEngineSettings
+    #     self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+    #     self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+    #     self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        
+    #     layout.addWidget(self.map_view)
+    #     layout.addWidget(self.map_view)
+
     def init_ui(self):
+        
         layout = QHBoxLayout(self)
         left_panel = QFrame(); left_panel.setFixedWidth(380); left_panel.setStyleSheet("background-color: #1e1e1e; border-radius: 10px;")
         v_lay = QVBoxLayout(left_panel)
@@ -146,11 +228,11 @@ class MissionPlannerApp(QWidget):
         self.table = QTableWidget(0, 4); self.table.setHorizontalHeaderLabels(["Seq", "Lat", "Lon", "Alt"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setStyleSheet("QTableWidget { background: #1a1a1a; color: white; }")
-        v_lay.addWidget(self.table)
+        
+        v_lay.addWidget(self.table, 1) 
         
         self.fence_points = []
         
-        # FUNCTION BUTTONS
         self.btn_clear_ui = QPushButton("CLEAR UI MAP"); self.btn_clear_ui.clicked.connect(self.clear_mission)
         self.btn_read = QPushButton("READ FROM FC"); self.btn_read.clicked.connect(self.read_mission)
         self.btn_write = QPushButton("WRITE TO FC"); self.btn_write.clicked.connect(self.write_mission)
@@ -158,30 +240,40 @@ class MissionPlannerApp(QWidget):
         self.btn_draw_fence = QPushButton("DRAW FENCE : OFF"); self.btn_draw_fence.setCheckable(True)
         self.btn_draw_fence.clicked.connect(self.toggle_fence_mode)
         
-        # --- 4. Button active ziczac ---
-        self.btn_draw_poly = QPushButton("DRAW ZIG-ZAG AREA : OFF"); self.btn_draw_poly.setCheckable(True)
+        self.btn_draw_poly = QPushButton("ZIG-ZAG : OFF"); self.btn_draw_poly.setCheckable(True)
         self.btn_draw_poly.clicked.connect(self.toggle_poly_mode)
         
         self.btn_clear_fence = QPushButton("CLEAR FENCE"); self.btn_clear_fence.clicked.connect(self.clear_fence)
         self.btn_upload_fence = QPushButton("UPLOAD FENCE"); self.btn_upload_fence.clicked.connect(self.upload_fence)
-        self.btn_delete_fc = QPushButton("DELETE FC MISSION"); self.btn_delete_fc.clicked.connect(self.delete_fc_mission)
-        self.btn_auto = QPushButton("START AUTO MODE"); self.btn_auto.clicked.connect(self.set_auto_mode)
-        self.btn_abort = QPushButton("ABORT AUTO (LOITER)"); self.btn_abort.clicked.connect(self.abort_auto)
+        self.btn_delete_fc = QPushButton("DEL FC MISSION"); self.btn_delete_fc.clicked.connect(self.delete_fc_mission)
+        self.btn_auto = QPushButton("START AUTO"); self.btn_auto.clicked.connect(self.set_auto_mode)
+        self.btn_abort = QPushButton("ABORT (LOITER)"); self.btn_abort.clicked.connect(self.abort_auto)
         
-        btn_style = "background: #2c3e50; color: white; font-weight: bold; padding: 10px; border-radius: 5px; margin-top: 2px;"
+        grid_btns = QGridLayout()
+        grid_btns.setSpacing(5)
         
+        grid_btns.addWidget(self.btn_draw_fence,   0, 0); grid_btns.addWidget(self.btn_draw_poly,    0, 1)
+        grid_btns.addWidget(self.btn_clear_fence,  1, 0); grid_btns.addWidget(self.btn_upload_fence, 1, 1)
+        grid_btns.addWidget(self.btn_read,         2, 0); grid_btns.addWidget(self.btn_write,        2, 1)
+        grid_btns.addWidget(self.btn_clear_ui,     3, 0); grid_btns.addWidget(self.btn_delete_fc,    3, 1)
+        grid_btns.addWidget(self.btn_auto,         4, 0); grid_btns.addWidget(self.btn_abort,        4, 1)
+
+        btn_style = "background: #2c3e50; color: white; font-weight: bold; padding: 8px; border-radius: 5px;"
         btn_list = [self.btn_draw_fence, self.btn_draw_poly, self.btn_clear_fence, self.btn_upload_fence, 
                     self.btn_clear_ui, self.btn_read, self.btn_write, self.btn_delete_fc, self.btn_auto, self.btn_abort]
                     
         for b in btn_list:
-            b.setStyleSheet(btn_style); v_lay.addWidget(b)
+            b.setStyleSheet(btn_style)
         
         self.btn_write.setStyleSheet(btn_style + "background: #27ae60;")
         self.btn_delete_fc.setStyleSheet(btn_style + "background: #e67e22;") 
         self.btn_auto.setStyleSheet(btn_style + "background: #8e44ad;")
         self.btn_abort.setStyleSheet(btn_style + "background: #c0392b;") 
 
+        v_lay.addLayout(grid_btns)
+
         layout.addWidget(left_panel)
+        
         self.map_view = QWebEngineView()
         self.map_page = MissionWebPage()
         
@@ -197,7 +289,7 @@ class MissionPlannerApp(QWidget):
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         
         layout.addWidget(self.map_view)
-        layout.addWidget(self.map_view)
+
     def load_map(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         map_path = os.path.join(base_dir, "F:\PBL_DATN\DUT_MCS_App\map_data\map_mission.html")
@@ -228,12 +320,23 @@ class MissionPlannerApp(QWidget):
     def delete_fc_mission(self):
         if not self.mav_worker or not self.mav_worker.connection: return
         self.mav_worker.connection.mav.mission_clear_all_send(self.mav_worker.connection.target_system, self.mav_worker.connection.target_component)
-        self.log("<b style='color:#e67e22;'>COMMAND: Mission Clear All sent to FC.</b>")
+        self.log("<b style='color:#e67e22;'>[COMMAND] Mission Clear All sent to FC</b>")
+
+    # def write_mission(self):
+    #     if not self.mav_worker or not self.mav_worker.connection: return
+    #     self.uploading = True
+    #     self.mav_worker.connection.mav.mission_count_send(self.mav_worker.connection.target_system, self.mav_worker.connection.target_component, len(self.waypoints) + 1)
+    #     self.log("<b style='color:#3498db;'>Uploading mission...</b>")
 
     def write_mission(self):
         if not self.mav_worker or not self.mav_worker.connection: return
         self.uploading = True
-        self.mav_worker.connection.mav.mission_count_send(self.mav_worker.connection.target_system, self.mav_worker.connection.target_component, len(self.waypoints) + 1)
+        self.uploading_type = 0  
+        conn = self.mav_worker.connection
+        try:
+            conn.mav.mission_count_send(conn.target_system, conn.target_component, len(self.waypoints) + 1, mission_type=0)
+        except TypeError:
+            conn.mav.mission_count_send(conn.target_system, conn.target_component, len(self.waypoints) + 1)
         self.log("<b style='color:#3498db;'>Uploading mission...</b>")
 
     def read_mission(self):
@@ -245,12 +348,12 @@ class MissionPlannerApp(QWidget):
     def set_auto_mode(self):
         if not self.mav_worker: return
         self.mav_worker.connection.mav.set_mode_send(self.mav_worker.connection.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 3) 
-        self.log("<b style='color:#9b59b6;'>Switching to AUTO Mode.</b>")
+        self.log("<b style='color:#9b59b6;'>Switching to AUTO Mode</b>")
 
     def abort_auto(self):
         if not self.mav_worker: return
         self.mav_worker.connection.mav.set_mode_send(self.mav_worker.connection.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 5) 
-        self.log("<b style='color:#c0392b;'>ABORT AUTO: Switching to LOITER (Safe Break).</b>")
+        self.log("<b style='color:#c0392b;'>ABORT AUTO: Switching to LOITER (Safe Break)</b>")
 
     def handle_mission_msg(self, data):
         if not self.mav_worker or not self.mav_worker.connection: return
@@ -258,27 +361,88 @@ class MissionPlannerApp(QWidget):
         t = data['type']; msg = data.get('msg_obj')
         if not msg: return
 
+        m_type = getattr(msg, 'mission_type', 0)
+
         if t in ['MISSION_REQUEST', 'MISSION_REQUEST_INT'] and self.uploading:
-            if msg.seq == 0: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0)
-            elif msg.seq <= len(self.waypoints):
-                wp = self.waypoints[msg.seq-1]
-                conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'])
+            # === Thread 1: UPLOAD WAYPOINT ===
+            if self.uploading_type == 0 and m_type == 0:
+                if msg.seq == 0: 
+                    try: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0, mission_type=0)
+                    except: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+                elif msg.seq <= len(self.waypoints):
+                    wp = self.waypoints[msg.seq-1]
+                    try: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'], mission_type=0)
+                    except: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'])
+            
+            # === Thread 2: UPLOAD GEOFENCE ===
+            # elif self.uploading_type == 1 and m_type == 1:
+            #     if msg.seq < len(self.upload_fence_list):
+            #         pt = self.upload_fence_list[msg.seq]
+            #         if msg.seq == 0:
+            #             conn.mav.mission_item_int_send(sys, comp, msg.seq, 0, 5000, 0, 0, 0, 0, 0, 0, int(pt['lat']*1e7), int(pt['lon']*1e7), 0, mission_type=1)
+            #         else:
+            #             v_count = len(self.upload_fence_list) - 1
+            #             conn.mav.mission_item_int_send(sys, comp, msg.seq, 0, 5001, 0, 0, v_count, 0, 0, 0, int(pt['lat']*1e7), int(pt['lon']*1e7), 0, mission_type=1)
+            elif self.uploading_type == 1 and m_type == 1:
+                if msg.seq < len(self.upload_fence_list):
+                    pt = self.upload_fence_list[msg.seq]
+                    
+                    # Tối ưu 2: Dùng đúng Frame 5 cho tọa độ *1e7
+                    frame_int = mavutil.mavlink.MAV_FRAME_GLOBAL_INT
+                    
+                    if msg.seq == 0:
+                        cmd = 5000 # MAV_CMD_NAV_FENCE_RETURN_POINT
+                        param1 = 0
+                    else:
+                        cmd = 5001 # MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION
+                        param1 = len(self.upload_fence_list) - 1 # Tổng số đỉnh
+                        
+                    # Tối ưu 3: Đồng bộ try/except chống lỗi văng app
+                    try:
+                        conn.mav.mission_item_int_send(
+                            sys, comp, msg.seq, frame_int, cmd, 0, 0, 
+                            param1, 0, 0, 0, 
+                            int(pt['lat']*1e7), int(pt['lon']*1e7), 0, 
+                            mission_type=1
+                        )
+                    except TypeError:
+                        conn.mav.mission_item_int_send(
+                            sys, comp, msg.seq, frame_int, cmd, 0, 0, 
+                            param1, 0, 0, 0, 
+                            int(pt['lat']*1e7), int(pt['lon']*1e7), 0
+                        )
+
         elif t == 'MISSION_COUNT' and self.downloading:
             self.download_count = msg.count
-            if self.download_count > 0: conn.mav.mission_request_int_send(sys, comp, 0)
-            else: self.downloading = False; self.log("Drone has no mission.")
-        elif t == 'MISSION_ITEM_INT' and self.downloading:
+            if self.download_count > 0: 
+                try: conn.mav.mission_request_int_send(sys, comp, 0, mission_type=0)
+                except: conn.mav.mission_request_int_send(sys, comp, 0)
+            else: self.downloading = False; self.log("Drone has no mission")
+
+        elif t == 'MISSION_ITEM_INT' and self.downloading and m_type == 0:
             if msg.seq > 0: self.downloaded_wps.append({'lat': msg.x/1e7, 'lon': msg.y/1e7, 'alt': msg.z})
-            if msg.seq < self.download_count - 1: conn.mav.mission_request_int_send(sys, comp, msg.seq + 1)
+            if msg.seq < self.download_count - 1: 
+                try: conn.mav.mission_request_int_send(sys, comp, msg.seq + 1, mission_type=0)
+                except: conn.mav.mission_request_int_send(sys, comp, msg.seq + 1)
             else:
-                self.downloading = False; conn.mav.mission_ack_send(sys, comp, 0)
+                self.downloading = False
+                try: conn.mav.mission_ack_send(sys, comp, 0, mission_type=0)
+                except: conn.mav.mission_ack_send(sys, comp, 0)
                 self.log(f"<b style='color:#2ecc71;'>DOWNLOAD SUCCESS!</b>"); self.clear_mission()
                 for wp in self.downloaded_wps: self.add_wp(wp['lat'], wp['lon'], wp['alt'])
+
         elif t == 'MISSION_ACK':
-            if self.uploading and msg.type == 0:
-                self.mission_uploaded_signal.emit(len(self.waypoints))
-            self.uploading = False; self.downloading = False
-            if msg.type == 0: self.log("<b style='color:#2ecc71;'>MISSION ACCEPTED!</b>")
+            if self.uploading:
+                self.uploading = False
+                if msg.type == 0: 
+                    if self.uploading_type == 0:
+                        self.mission_uploaded_signal.emit(len(self.waypoints))
+                        self.log("<b style='color:#2ecc71;'>MISSION ACCEPTED!</b>")
+                    elif self.uploading_type == 1:
+                        self.configure_sitl_fence()
+                        self.log("<b style='color:#2ecc71;'>GEOFENCE UPLOADED & ACCEPTED!</b>")
+                else:
+                    self.log(f"<b style='color:red;'>UPLOAD FAILED: ACK ERROR {msg.type}</b>")
             
     def update_drone_position(self, lat, lon, heading, course=0):
         if hasattr(self, 'map_view'):
@@ -291,7 +455,7 @@ class MissionPlannerApp(QWidget):
             self.btn_draw_fence.setText("DRAW FENCE : ON")
             self.btn_draw_fence.setStyleSheet("background: #e74c3c; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
             self.map_view.page().runJavaScript("if(typeof toggleFenceMode === 'function') toggleFenceMode(true);")
-            self.log("<b style='color:#e74c3c;'>Fence Mode ON: Click map to draw boundary.</b>")
+            self.log("<b style='color:#e74c3c;'>Fence Mode ON: Click map to draw boundary</b>")
         else:
             self.btn_draw_fence.setText("DRAW FENCE : OFF")
             self.btn_draw_fence.setStyleSheet("background: #2c3e50; color: white; font-weight: bold; padding: 10px; border-radius: 5px;")
@@ -339,7 +503,7 @@ class MissionPlannerApp(QWidget):
         zigzag_path = generate_zigzag_path(polygon_points, spacing, direction) 
         
         if not zigzag_path:
-            self.log("<b style='color:red;'>[MISSION] Error: Cannot generate flight paths for this polygon.</b>")
+            self.log("<b style='color:red;'>[MISSION] Error: Cannot generate flight paths for this polygon</b>")
             return
             
         self.log(f"<b style='color:#2ecc71;'>[MISSION] Successfully generated {len(zigzag_path)} Waypoints! Loading...</b>")
@@ -357,47 +521,52 @@ class MissionPlannerApp(QWidget):
     def clear_fence(self):
         self.fence_points = []
         self.map_view.page().runJavaScript("if(typeof clearFenceMap === 'function') clearFenceMap();")
-        self.log("Geofence cleared from UI.")
-        
         if self.mav_worker and self.mav_worker.connection:
             conn = self.mav_worker.connection
             conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ENABLE', 0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-            conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_TOTAL', 0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-            self.log("<b style='color:#e67e22;'>[SYSTEM] Geofence DISABLED and CLEARED from FC memory!</b>")
+            try:
+                conn.mav.mission_clear_all_send(conn.target_system, conn.target_component, mission_type=1)
+            except: pass
+            self.log("<b style='color:#e67e22;'>[SYSTEM] Geofence DISABLED and CLEARED!</b>")
 
+    # def configure_sitl_fence(self):
+    #     if not self.mav_worker or not self.mav_worker.connection: return
+    #     conn = self.mav_worker.connection
+    #     conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_TYPE', 4, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+    #     conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ACTION', 4, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+    #     conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+    #     self.log("<b style='color:#3498db;'>[SYSTEM] SITL Fence Parameters Configured!</b>")
     def configure_sitl_fence(self):
         if not self.mav_worker or not self.mav_worker.connection: return
         conn = self.mav_worker.connection
         conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_TYPE', 4, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
         conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ACTION', 4, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
         conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-        self.log("<b style='color:#3498db;'>[SYSTEM] SITL Fence Parameters Configured!</b>")
+    
+        self.log("<b style='color:#3498db;'>[SYSTEM] SITL Fence Parameters Configured (TYPE=7)!</b>")
 
     def upload_fence(self):
         if not self.mav_worker or not self.mav_worker.connection: return
         count = len(self.fence_points)
         if count < 3:
-            self.log("<b style='color:red;'>Error: Geofence requires at least 3 points!</b>"); return
+            self.log("<b style='color:red;'>[ERROR] Geofence requires at least 3 points!</b>"); return
 
         conn = self.mav_worker.connection
         center_lat = sum(p['lat'] for p in self.fence_points) / count
         center_lon = sum(p['lon'] for p in self.fence_points) / count
 
-        upload_points = [{'lat': center_lat, 'lon': center_lon}] 
-        upload_points.extend(self.fence_points)                  
-        upload_points.append(self.fence_points[0])               
+        self.upload_fence_list = [{'lat': center_lat, 'lon': center_lon}] 
+        self.upload_fence_list.extend(self.fence_points)
+        self.upload_fence_list.append(self.fence_points[0]) 
 
-        total_points = len(upload_points)
-
-        conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_TOTAL', total_points, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-        conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_TYPE', 4, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-        conn.mav.param_set_send(conn.target_system, conn.target_component, b'FENCE_ACTION', 1, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
-
-        for i, pt in enumerate(upload_points):
-            conn.mav.fence_point_send(conn.target_system, conn.target_component, i, total_points, pt['lat'], pt['lon'])
-
-        self.configure_sitl_fence()
-        self.log(f"<b style='color:#2ecc71;'>UPLOADED GEOFENCE ({total_points} points incl. Return/Close) & ENABLED!</b>")
+        self.uploading = True
+        self.uploading_type = 1 
+        
+        try:
+            conn.mav.mission_count_send(conn.target_system, conn.target_component, len(self.upload_fence_list), mission_type=1)
+            self.log("<b style='color:#f39c12;'>[FENCE] Start loading polygons via Mission Protocol...</b>")
+        except TypeError:
+            self.log("<b style='color:red;'>[ERROR] The Pymavlink library does not have MAVLink2 enabled!</b>")
 
     def action_fly_here(self, lat, lon):
         if not self.mav_worker or not self.mav_worker.connection:

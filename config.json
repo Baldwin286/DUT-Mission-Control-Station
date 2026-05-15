@@ -1,7 +1,7 @@
 {
     "paths": {
       "model_yolo": "F:\\PBL6\\model3\\yolo\\my_model.pt",
-      "flag_vn": "F:\\PBL_DATN\\DUT_MCS_App\\pictures\\VN_flag.jpg",
+      "flag_vn": "F:\\PBL_DATN\\DUT_MCS_App\\pictures\\KCK_logo.jpg",
       "flag_dut": "F:\\PBL_DATN\\DUT_MCS_App\\pictures\\image002.jpg",
       "map_mcs": "F:\\PBL_DATN\\DUT_MCS_App\\map_data\\map_MCS.html",
       "map_mission": "F:\\PBL_DATN\\DUT_MCS_App\\map_data\\map_mission.html",
