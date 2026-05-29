@@ -1429,15 +1429,28 @@ class DroneApp(QMainWindow):
             QMessageBox.warning(self, "WARNING", "You must connect to the drone before starting the video stream!")
             return
 
-        # IP RASPBERRY PI
-        #PI_IP = "192.168.1.22" 
         PI_IP = CONFIG.get("network", {}).get("companion_ip", "100.104.204.36")
         PI_PORT = CONFIG.get("network", {}).get("companion_port", 8888)
         
         try:
+            if command == "STOP_STREAM":
+                self.is_camera_on = False
+                self.stop_video_record()
+                
+                if hasattr(self, 'video_thread') and self.video_thread.isRunning():
+                    self.video_thread.stop()
+                    
+                if hasattr(self, 'video_frame'):
+                    self.video_frame.setPixmap(QPixmap()) 
+                    self.video_frame.setText("THE CAMERA IS OFF")
+                    self.video_frame.setStyleSheet("background: black; color: #7f8c8d; font-size: 24px; font-weight: bold; border: 2px solid #333; border-radius: 10px;")
+                    
+                if hasattr(self, 'ai_log'):
+                    self.ai_log.append("<span style='color: #e74c3c;'>[CAMERA] Sent command to turn OFF the video stream...</span>")
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(command.encode('utf-8'), (PI_IP, PI_PORT))
-            
+
             if command == "START_STREAM":
                 self.is_camera_on = True
                 if not self.video_thread.isRunning():
@@ -1447,18 +1460,6 @@ class DroneApp(QMainWindow):
                     self.video_thread.start() 
                 if hasattr(self, 'ai_log'):
                     self.ai_log.append("<span style='color: #2ecc71;'>[CAMERA] Sent command to turn ON the video stream...</span>")
-            
-            elif command == "STOP_STREAM":
-                self.is_camera_on = False 
-                self.stop_video_record() 
-                if hasattr(self, 'video_thread') and self.video_thread.isRunning():
-                    self.video_thread.stop()
-                if hasattr(self, 'video_frame'):
-                    self.video_frame.setPixmap(QPixmap()) 
-                    self.video_frame.setText("THE CAMERA IS OFF")
-                    self.video_frame.setStyleSheet("background: black; color: #7f8c8d; font-size: 24px; font-weight: bold; border: 2px solid #333; border-radius: 10px;")
-                if hasattr(self, 'ai_log'):
-                    self.ai_log.append("<span style='color: #e74c3c;'>[CAMERA] Sent command to turn OFF the video stream...</span>")
                     
         except Exception as e:
             if hasattr(self, 'ai_log'):
@@ -2801,13 +2802,13 @@ class DroneApp(QMainWindow):
         return QPixmap.fromImage(qt_img)
         
     def closeEvent(self, event):
-        self.stop_video_record() 
+        #self.stop_video_record() 
         self.send_camera_command("STOP_STREAM")
         
         if hasattr(self, 'mav_worker') and self.mav_worker:
             self.mav_worker.stop()  
-        if hasattr(self, 'video_thread') and self.video_thread:
-            self.video_thread.stop()
+        # if hasattr(self, 'video_thread') and self.video_thread:
+        #     self.video_thread.stop()
             
         if hasattr(self, 'pl_thread') and self.pl_thread:
             self.pl_thread.stop()

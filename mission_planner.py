@@ -365,15 +365,27 @@ class MissionPlannerApp(QWidget):
 
         if t in ['MISSION_REQUEST', 'MISSION_REQUEST_INT'] and self.uploading:
             # === Thread 1: UPLOAD WAYPOINT ===
-            if self.uploading_type == 0 and m_type == 0:
-                if msg.seq == 0: 
-                    try: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0, mission_type=0)
-                    except: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0)
-                elif msg.seq <= len(self.waypoints):
+            # if self.uploading_type == 0 and m_type == 0:
+            #     if msg.seq == 0: 
+            #         try: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0, mission_type=0)
+            #         except: conn.mav.mission_item_int_send(sys, comp, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+            #     elif msg.seq <= len(self.waypoints):
+            #         wp = self.waypoints[msg.seq-1]
+            #         try: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'], mission_type=0)
+            #         except: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'])
+            frame_int_alt = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT 
+                
+            if msg.seq == 0: 
+                    try: conn.mav.mission_item_int_send(sys, comp, 0, frame_int_alt, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0, mission_type=0)
+                    except: conn.mav.mission_item_int_send(sys, comp, 0, frame_int_alt, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+            elif msg.seq <= len(self.waypoints):
                     wp = self.waypoints[msg.seq-1]
-                    try: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'], mission_type=0)
-                    except: conn.mav.mission_item_int_send(sys, comp, msg.seq, 3, 16, 0, 1, 0, 0, 0, 0, int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'])
-            
+                    try: conn.mav.mission_item_int_send(
+                        sys, comp, msg.seq, frame_int_alt, 16, 0, 1, 0, 0, 0, 0, 
+                        int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'], mission_type=0)
+                    except: conn.mav.mission_item_int_send(
+                        sys, comp, msg.seq, frame_int_alt, 16, 0, 1, 0, 0, 0, 0, 
+                        int(wp['lat']*1e7), int(wp['lon']*1e7), wp['alt'])
             # === Thread 2: UPLOAD GEOFENCE ===
             # elif self.uploading_type == 1 and m_type == 1:
             #     if msg.seq < len(self.upload_fence_list):
